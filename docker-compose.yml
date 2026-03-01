@@ -1,0 +1,194 @@
+# ══════════════════════════════════════════════════════════════════════
+# AI Interviewer — Root Compose File
+#
+# Starts all services from one place:
+#   docker compose up --build
+#
+# First run only — seed interview data (after containers are up):
+#   docker compose exec interview-agent python setup_db.py
+#
+# Secrets: copy .env.example → .env and fill in your keys before running.
+#
+# Flow:
+#   UI form → interviews.interviews (insert)
+#     ├── interview-agent (greeting watcher) → interviews.transcripts {speaker=agent}
+#     │     └── tts → ElevenLabs → PulseAudio → Chrome (plays in meeting)
+#     └── meeting-bot → Chrome joins meeting
+#           └── caption scraper → interviews.transcripts {speaker=candidate}
+#                 └── interview-agent (candidate watcher) → LLM → transcripts {speaker=agent}
+#                       └── tts → plays response → loop
+# ══════════════════════════════════════════════════════════════════════
+
+services:
+
+  # ────────────────────────────────────────────────────────────────
+  # MongoDB 7 with single-node replica set.
+  # Change streams (used by all services) require a replica set.
+  # ────────────────────────────────────────────────────────────────
+  mongodb:
+    image: mongo:7.0
+    container_name: mongodb
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "27017:27017"       # Exposed so you can connect from host (Compass, etc.)
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - interview-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────────────
+  # One-shot: initialise the replica set on first boot.
+  # Idempotent — safe to re-run.
+  # ────────────────────────────────────────────────────────────────
+  mongo-init:
+    image: mongo:7.0
+    container_name: mongo-init
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    entrypoint: >
+      mongosh --host mongodb:27017 --quiet --eval
+      "try { rs.status(); print('rs0 already initialised'); }
+       catch(e) { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'mongodb:27017' }] });
+                  print('rs0 initialised'); }"
+    networks:
+      - interview-net
+    restart: "no"
+
+  # ────────────────────────────────────────────────────────────────
+  # Main-Agent: LLM brain.
+  # Watches interviews.transcripts (speaker=candidate) → generates response.
+  # Also watches interviews.interviews → inserts opening greeting.
+  # ────────────────────────────────────────────────────────────────
+  interview-agent:
+    build:
+      context: ./Main-Agent
+      dockerfile: Dockerfile
+    container_name: interview-agent
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      # Override URI to use the internal Docker hostname + replica set
+      MONGODB_URI: "mongodb://mongodb:27017/?replicaSet=rs0"
+      MONGODB_DB: "interviews"
+      LOG_FILE: ""              # Stdout only inside Docker
+    networks:
+      - interview-net
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────────────
+  # TTS: text-to-speech.
+  # Watches interviews.transcripts (speaker=agent, audio_url=null).
+  # Calls ElevenLabs, plays audio through PulseAudio virtual mic
+  # into the Meeting-Bot Chrome browser.
+  #
+  # Audio note: TTS outputs via sounddevice → PulseAudio.
+  # On a Linux host, mount the PulseAudio socket:
+  #   volumes:
+  #     - /run/user/1000/pulse:/run/user/1000/pulse
+  # and set PULSE_SERVER=unix:/run/user/1000/pulse/native in .env.
+  # ────────────────────────────────────────────────────────────────
+  tts:
+    build:
+      context: ./TTS
+      dockerfile: Dockerfile
+    container_name: tts
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+      meeting-bot:
+        condition: service_started   # Wait for Meeting-Bot's PulseAudio to start
+    env_file: .env
+    environment:
+      MONGODB_URI: "mongodb://mongodb:27017/?replicaSet=rs0"
+      MONGODB_DB: "interviews"
+      TRANSCRIPTS_COLLECTION: "transcripts"
+      PYTHONUNBUFFERED: "1"
+      # Connect sounddevice → PulseAudio running inside the meeting-bot container.
+      # The socket is shared via the pulse-socket Docker volume.
+      PULSE_SERVER: "unix:/var/run/pulse/native"
+      PULSE_SINK: "virtual_mic"        # Route sounddevice output to the null-sink Chrome reads
+    volumes:
+      - pulse-socket:/var/run/pulse   # Shared PulseAudio socket from Meeting-Bot
+    networks:
+      - interview-net
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────────────
+  # Meeting-Bot: headless Chrome + caption scraper.
+  # Watches interviews.interviews → joins the Google Meet URL.
+  # Scrapes captions → writes speaker=candidate to interviews.transcripts.
+  # Xvfb + PulseAudio are started by entrypoint.sh.
+  # ────────────────────────────────────────────────────────────────
+  meeting-bot:
+    build:
+      context: ./Meeting-Bot
+      dockerfile: Dockerfile
+    container_name: meeting-bot
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      MONGODB_URI: "mongodb://mongodb:27017/?replicaSet=rs0"
+      DISPLAY: ":99"
+      PULSE_SERVER: "unix:/var/run/pulse/native"
+    ports:
+      - "6080:6080"   # noVNC — open http://localhost:6080/vnc.html to watch Chrome
+      - "5900:5900"   # Raw VNC (optional — for a native VNC client)
+    # Shared memory required for Chrome in Docker
+    shm_size: "2gb"
+    volumes:
+      - meeting_bot_recordings:/app/recordings
+      - pulse-socket:/var/run/pulse    # PulseAudio socket exposed here for TTS
+    networks:
+      - interview-net
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────────────
+  # UI: FastAPI web form.
+  # One DB insert fires the whole pipeline.
+  # Open http://localhost:8080 in your browser.
+  # ────────────────────────────────────────────────────────────────
+  ui:
+    build:
+      context: ./UI
+      dockerfile: Dockerfile
+    container_name: ui
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      MONGODB_URI: "mongodb://mongodb:27017/?replicaSet=rs0"
+    ports:
+      - "8080:8080"
+    networks:
+      - interview-net
+    restart: unless-stopped
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Volumes
+# ══════════════════════════════════════════════════════════════════════
+volumes:
+  mongodb_data:
+  meeting_bot_recordings:
+  pulse-socket:      # Shared between meeting-bot (PulseAudio server) and tts (client)
+
+# ══════════════════════════════════════════════════════════════════════
+# Networks
+# ══════════════════════════════════════════════════════════════════════
+networks:
+  interview-net:
+    name: interview-net
+    driver: bridge

@@ -1,0 +1,160 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #f4f6f9;
+  color: #333;
+  min-height: 100vh;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 40px 16px;
+}
+
+.container {
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+  padding: 40px;
+  width: 100%;
+  max-width: 680px;
+}
+
+h1 {
+  font-size: 1.8rem;
+  margin-bottom: 8px;
+  color: #1a1a2e;
+}
+
+.subtitle {
+  color: #666;
+  margin-bottom: 28px;
+  font-size: 0.95rem;
+}
+
+.field {
+  margin-bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+label {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+input[type="text"],
+input[type="file"],
+textarea {
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 0.95rem;
+  width: 100%;
+  transition: border-color 0.2s;
+  resize: vertical;
+}
+
+input[type="text"]:focus,
+input[type="file"]:focus,
+textarea:focus {
+  outline: none;
+  border-color: #4f46e5;
+}
+
+input[type="file"] {
+  cursor: pointer;
+  padding: 8px 12px;
+  background: #f9fafb;
+}
+
+.hint {
+  font-weight: 400;
+  font-size: 0.82rem;
+  color: #9ca3af;
+}
+
+button[type="submit"] {
+  margin-top: 8px;
+  width: 100%;
+  padding: 12px;
+  background: #4f46e5;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+button[type="submit"]:hover:not(:disabled) {
+  background: #4338ca;
+}
+
+button[type="submit"]:disabled {
+  background: #a5b4fc;
+  cursor: not-allowed;
+}
+
+.result {
+  margin-top: 20px;
+  padding: 14px 16px;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  line-height: 1.6;
+}
+
+.result.hidden {
+  display: none;
+}
+
+.result.success {
+  background: #ecfdf5;
+  border: 1px solid #6ee7b7;
+  color: #065f46;
+}
+
+.result.error {
+  background: #fef2f2;
+  border: 1px solid #fca5a5;
+  color: #991b1b;
+}
+
+code {
+  background: #f3f4f6;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 0.9em;
+}
+
+.leave-btn {
+  padding: 8px 20px;
+  background: #dc2626;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.leave-btn:hover:not(:disabled) {
+  background: #b91c1c;
+}
+
+.leave-btn:disabled {
+  background: #fca5a5;
+  cursor: not-allowed;
+}
+
+.leave-btn.left {
+  background: #6b7280;
+}

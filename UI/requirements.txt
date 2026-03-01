@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+jinja2
+motor
+python-dotenv
+python-multipart
+pdfplumber
+python-docx

@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Interviewer</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="container">
+    <h1>AI Interviewer</h1>
+    <p class="subtitle">Fill in the details below and click <strong>Start Interview</strong> to launch the session.</p>
+
+    <form id="interviewForm">
+      <div class="field">
+        <label for="meeting_url">Google Meet URL</label>
+        <input
+          type="text"
+          id="meeting_url"
+          name="meeting_url"
+          placeholder="https://meet.google.com/xxx-yyy-zzz"
+          required
+        />
+      </div>
+
+      <div class="field">
+        <label for="job_description">Job Description</label>
+        <textarea
+          id="job_description"
+          name="job_description"
+          rows="5"
+          placeholder="Paste the job description here..."
+          required
+        ></textarea>
+      </div>
+
+      <div class="field">
+        <label for="company_info">Company Info</label>
+        <textarea
+          id="company_info"
+          name="company_info"
+          rows="4"
+          placeholder="Brief overview of the company, culture, tech stack..."
+          required
+        ></textarea>
+      </div>
+
+      <div class="field">
+        <label for="candidate_cv">Candidate CV <span class="hint">(PDF or DOCX)</span></label>
+        <input
+          type="file"
+          id="candidate_cv"
+          name="candidate_cv"
+          accept=".pdf,.docx"
+          required
+        />
+      </div>
+
+      <button type="submit" id="submitBtn">Start Interview</button>
+    </form>
+
+    <div id="result" class="result hidden"></div>
+  </div>
+
+  <script>
+    const form = document.getElementById('interviewForm');
+    const result = document.getElementById('result');
+    const btn = document.getElementById('submitBtn');
+    let currentInterviewId = null;
+
+    // Persist text fields across reloads
+    const PERSIST_FIELDS = ['meeting_url', 'job_description', 'company_info'];
+    PERSIST_FIELDS.forEach(id => {
+      const el = document.getElementById(id);
+      const saved = localStorage.getItem('ai_interviewer_' + id);
+      if (saved) el.value = saved;
+      el.addEventListener('input', () => localStorage.setItem('ai_interviewer_' + id, el.value));
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      btn.disabled = true;
+      btn.textContent = 'Starting...';
+      result.className = 'result hidden';
+
+      const data = new FormData(form);
+
+      try {
+        const res = await fetch('/start', { method: 'POST', body: data });
+        const json = await res.json();
+
+        if (json.status === 'started') {
+          currentInterviewId = json.interview_id;
+          result.className = 'result success';
+          result.innerHTML = `
+            <strong>Interview started!</strong><br/>
+            Interview ID: <code>${json.interview_id}</code><br/><br/>
+            <button id="leaveBtn" class="leave-btn" onclick="leaveInterview()">Leave Meeting</button>
+          `;
+        } else {
+          throw new Error(JSON.stringify(json));
+        }
+      } catch (err) {
+        result.className = 'result error';
+        result.textContent = `Error: ${err.message}`;
+        btn.disabled = false;
+        btn.textContent = 'Start Interview';
+      }
+    });
+
+    async function leaveInterview() {
+      if (!currentInterviewId) return;
+      const leaveBtn = document.getElementById('leaveBtn');
+      leaveBtn.disabled = true;
+      leaveBtn.textContent = 'Leaving...';
+      try {
+        const res = await fetch(`/stop/${currentInterviewId}`, { method: 'POST' });
+        const json = await res.json();
+        if (json.status === 'stopped') {
+          leaveBtn.textContent = 'Left Meeting';
+          leaveBtn.classList.add('left');
+        }
+      } catch (err) {
+        leaveBtn.disabled = false;
+        leaveBtn.textContent = 'Leave Meeting';
+        alert(`Error: ${err.message}`);
+      }
+    }
+  </script>
+</body>
+</html>
