@@ -337,65 +337,6 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
             # { speaker_name: {"parts": [str], "timer": asyncio.Task | None} }
             _utterance_buffers: dict = {}
 
-            # ── Agent echo detection ──────────────────────────────────────
-            # Chrome's mic input is PulseAudio virtual_mic_source (the monitor
-            # of the null-sink where TTS plays). Google Meet captions the
-            # agent's own audio, often as "Unknown" speaker (name widget loads
-            # late). The (AI) speaker filter handles the named case; this cache
-            # handles the Unknown case.
-            #
-            # A background watcher streams new agent transcripts into a dict.
-            # on_caption checks each incoming text against the cache before
-            # buffering it as candidate speech.
-            # ─────────────────────────────────────────────────────────────
-            import time as _time
-            _agent_texts: dict[str, float] = {}  # normalized_text → monotonic time
-            AGENT_TEXT_TTL = 90.0  # seconds to retain agent text in cache
-
-            async def _watch_agent_texts() -> None:
-                """Cache agent transcript texts to filter echo in on_caption."""
-                db = mongo_handler.get_db()
-                if db is None:
-                    return
-                try:
-                    pipeline = [{"$match": {
-                        "operationType": "insert",
-                        "fullDocument.speaker": "agent",
-                        "fullDocument.interview_id": interview_id,
-                    }}]
-                    async with db.transcripts.watch(pipeline, full_document="updateLookup") as stream:
-                        async for change in stream:
-                            text = change["fullDocument"].get("text", "").strip().lower()
-                            if text:
-                                _agent_texts[text] = _time.monotonic()
-                except asyncio.CancelledError:
-                    pass
-                except Exception as e:
-                    print(f"Agent text watcher error: {e}")
-
-            def _is_agent_echo(text: str) -> bool:
-                """Return True if text is likely a re-captured agent utterance."""
-                now = _time.monotonic()
-                # Evict stale entries
-                for k in list(_agent_texts.keys()):
-                    if now - _agent_texts[k] > AGENT_TEXT_TTL:
-                        del _agent_texts[k]
-                if not _agent_texts:
-                    return False
-                text_lc = text.strip().lower()
-                text_words = set(text_lc.split())
-                for agent_text in _agent_texts:
-                    # Direct substring: agent said exactly this, or this is part of what agent said
-                    if text_lc in agent_text or agent_text in text_lc:
-                        return True
-                    # Word overlap: >= 60% of incoming words are in agent text
-                    if len(text_words) >= 4:
-                        agent_words = set(agent_text.split())
-                        overlap = len(text_words & agent_words) / len(text_words)
-                        if overlap >= 0.6:
-                            return True
-                return False
-
             async def _flush_speaker(speaker: str, buf: dict) -> None:
                 """Wait for silence, then write the full utterance to DB."""
                 try:
@@ -429,12 +370,6 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                         print(msg); await push_log(msg)
                         return
 
-                    # Skip agent's own TTS audio re-captured as Unknown speaker.
-                    if _is_agent_echo(text):
-                        msg = f"Echo filter: skipped [{speaker}]: {text[:50]!r}"
-                        print(msg); await push_log(msg)
-                        return
-
                     # Initialise buffer slot for first caption from this speaker
                     if speaker not in _utterance_buffers:
                         _utterance_buffers[speaker] = {"parts": [], "timer": None}
@@ -459,14 +394,12 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
 
             # Run caption scraper and leave watcher concurrently.
             # Whichever finishes first (meeting ends or leave signal) cancels the other.
-            # The agent text watcher runs in the background and is cancelled after.
             scrape_task = asyncio.create_task(
                 scrape_meeting_captions(page, session_id, on_caption)
             )
             leave_task = asyncio.create_task(
                 _watch_for_leave(interview_id, page)
             )
-            agent_text_task = asyncio.create_task(_watch_agent_texts())
 
             done, pending = await asyncio.wait(
                 [scrape_task, leave_task],
@@ -478,7 +411,6 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                     await asyncio.wait_for(asyncio.shield(t), timeout=2.0)
                 except (asyncio.CancelledError, asyncio.TimeoutError):
                     pass
-            agent_text_task.cancel()
 
             msg = "Meeting ended — caption scraping complete"
             print(msg); await push_log(msg)
