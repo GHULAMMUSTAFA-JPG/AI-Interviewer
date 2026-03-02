@@ -91,6 +91,8 @@
 
         if (json.status === 'started') {
           currentInterviewId = json.interview_id;
+          btn.disabled = true;
+          btn.textContent = 'Interview in Progress';
           result.className = 'result success';
           result.innerHTML = `
             <strong>Interview started!</strong><br/>
@@ -119,6 +121,9 @@
         if (json.status === 'stopped') {
           leaveBtn.textContent = 'Left Meeting';
           leaveBtn.classList.add('left');
+          currentInterviewId = null;
+          btn.disabled = false;
+          btn.textContent = 'Start Interview';
         }
       } catch (err) {
         leaveBtn.disabled = false;

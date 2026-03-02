@@ -43,7 +43,7 @@ async def connect_to_mongo() -> bool:
 async def disconnect_from_mongo() -> None:
     global client, db
     try:
-        if client:
+        if client is not None:
             client.close()
             client = None
             db = None

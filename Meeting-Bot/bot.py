@@ -9,8 +9,6 @@ Key differences from STT/bot_logic.py:
 """
 
 import asyncio
-import tempfile
-import shutil
 from pathlib import Path
 from datetime import datetime
 from playwright.async_api import async_playwright
@@ -78,7 +76,21 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
         interview_id: interviews.interviews _id / interview_id field
         headless:     Whether to run Chrome headlessly (False for dev, True for prod)
     """
-    temp_dir = tempfile.mkdtemp(prefix="meet_bot_")
+    # Persistent Chrome profile — survives container restarts.
+    # Mount /app/chrome_profile as a Docker volume so login/cookies persist.
+    PROFILE_DIR = "/app/chrome_profile"
+    Path(PROFILE_DIR).mkdir(parents=True, exist_ok=True)
+
+    # Remove stale Chrome lock files left behind by a previous crash or
+    # unclean shutdown.  If these files exist, launch_persistent_context
+    # cannot acquire the profile lock and silently falls back to a fresh
+    # (unlogged-in) profile, losing all saved cookies and Gmail login.
+    for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        lock_path = Path(PROFILE_DIR) / lock_name
+        try:
+            lock_path.unlink(missing_ok=True)
+        except Exception:
+            pass
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     name = email.split("@")[0]
 
@@ -100,6 +112,7 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                 "--disable-blink-features=AutomationControlled",
                 "--autoplay-policy=no-user-gesture-required",
                 "--window-position=0,0",
+                "--window-size=1280,720",         # Match Xvfb display resolution
                 "--disable-infobars",
                 "--mute-audio",              # Mute speaker output (we don't need to hear)
                 "--disable-camera-input",
@@ -116,10 +129,10 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
             print(msg); await push_log(msg)
 
             ctx = await p.chromium.launch_persistent_context(
-                user_data_dir=temp_dir,
+                user_data_dir=PROFILE_DIR,
                 headless=headless,
                 channel="chrome",
-                viewport={"width": 800, "height": 600},
+                viewport={"width": 1280, "height": 720},
                 args=chrome_args,
                 accept_downloads=False,
                 ignore_default_args=["--enable-automation"],
@@ -296,18 +309,16 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
             await page.wait_for_timeout(1000)
 
             # Signal that Chrome is live in the meeting and transmitting audio.
-            # Main-Agent watches for this update before inserting the greeting,
-            # so TTS only plays after the virtual_mic → Chrome → Meet path is active.
             db = mongo_handler.get_db()
-            if db:
+            if db is not None:
                 await db.interviews.update_one(
                     {"interview_id": interview_id},
                     {"$set": {"bot_status": "admitted"}}
                 )
-                msg = "Interview updated: bot_status=admitted — greeting will now play"
+                msg = "Interview updated: bot_status=admitted"
                 print(msg); await push_log(msg)
 
-            msg = "Starting caption scraping and audio watcher..."
+            msg = "Starting caption scraping..."
             print(msg); await push_log(msg)
 
             # ── Utterance buffer ──────────────────────────────────────────
@@ -321,10 +332,69 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
             # timer. When the timer actually fires (real silence), flush the
             # entire accumulated turn as ONE DB insert.
             # ─────────────────────────────────────────────────────────────
-            UTTERANCE_SILENCE_SEC = 4.0
+            UTTERANCE_SILENCE_SEC = 2.0
 
             # { speaker_name: {"parts": [str], "timer": asyncio.Task | None} }
             _utterance_buffers: dict = {}
+
+            # ── Agent echo detection ──────────────────────────────────────
+            # Chrome's mic input is PulseAudio virtual_mic_source (the monitor
+            # of the null-sink where TTS plays). Google Meet captions the
+            # agent's own audio, often as "Unknown" speaker (name widget loads
+            # late). The (AI) speaker filter handles the named case; this cache
+            # handles the Unknown case.
+            #
+            # A background watcher streams new agent transcripts into a dict.
+            # on_caption checks each incoming text against the cache before
+            # buffering it as candidate speech.
+            # ─────────────────────────────────────────────────────────────
+            import time as _time
+            _agent_texts: dict[str, float] = {}  # normalized_text → monotonic time
+            AGENT_TEXT_TTL = 90.0  # seconds to retain agent text in cache
+
+            async def _watch_agent_texts() -> None:
+                """Cache agent transcript texts to filter echo in on_caption."""
+                db = mongo_handler.get_db()
+                if db is None:
+                    return
+                try:
+                    pipeline = [{"$match": {
+                        "operationType": "insert",
+                        "fullDocument.speaker": "agent",
+                        "fullDocument.interview_id": interview_id,
+                    }}]
+                    async with db.transcripts.watch(pipeline, full_document="updateLookup") as stream:
+                        async for change in stream:
+                            text = change["fullDocument"].get("text", "").strip().lower()
+                            if text:
+                                _agent_texts[text] = _time.monotonic()
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    print(f"Agent text watcher error: {e}")
+
+            def _is_agent_echo(text: str) -> bool:
+                """Return True if text is likely a re-captured agent utterance."""
+                now = _time.monotonic()
+                # Evict stale entries
+                for k in list(_agent_texts.keys()):
+                    if now - _agent_texts[k] > AGENT_TEXT_TTL:
+                        del _agent_texts[k]
+                if not _agent_texts:
+                    return False
+                text_lc = text.strip().lower()
+                text_words = set(text_lc.split())
+                for agent_text in _agent_texts:
+                    # Direct substring: agent said exactly this, or this is part of what agent said
+                    if text_lc in agent_text or agent_text in text_lc:
+                        return True
+                    # Word overlap: >= 60% of incoming words are in agent text
+                    if len(text_words) >= 4:
+                        agent_words = set(agent_text.split())
+                        overlap = len(text_words & agent_words) / len(text_words)
+                        if overlap >= 0.6:
+                            return True
+                return False
 
             async def _flush_speaker(speaker: str, buf: dict) -> None:
                 """Wait for silence, then write the full utterance to DB."""
@@ -352,6 +422,19 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                     if "(ai)" in speaker.lower() or not text:
                         return
 
+                    # Skip very short captures that are likely background noise
+                    # (single words, punctuation bursts, ambient sound artefacts).
+                    if len(text) < 10 and len(text.split()) < 3:
+                        msg = f"Noise filter: skipped [{speaker}]: {text!r}"
+                        print(msg); await push_log(msg)
+                        return
+
+                    # Skip agent's own TTS audio re-captured as Unknown speaker.
+                    if _is_agent_echo(text):
+                        msg = f"Echo filter: skipped [{speaker}]: {text[:50]!r}"
+                        print(msg); await push_log(msg)
+                        return
+
                     # Initialise buffer slot for first caption from this speaker
                     if speaker not in _utterance_buffers:
                         _utterance_buffers[speaker] = {"parts": [], "timer": None}
@@ -376,12 +459,14 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
 
             # Run caption scraper and leave watcher concurrently.
             # Whichever finishes first (meeting ends or leave signal) cancels the other.
+            # The agent text watcher runs in the background and is cancelled after.
             scrape_task = asyncio.create_task(
                 scrape_meeting_captions(page, session_id, on_caption)
             )
             leave_task = asyncio.create_task(
                 _watch_for_leave(interview_id, page)
             )
+            agent_text_task = asyncio.create_task(_watch_agent_texts())
 
             done, pending = await asyncio.wait(
                 [scrape_task, leave_task],
@@ -393,6 +478,7 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                     await asyncio.wait_for(asyncio.shield(t), timeout=2.0)
                 except (asyncio.CancelledError, asyncio.TimeoutError):
                     pass
+            agent_text_task.cancel()
 
             msg = "Meeting ended — caption scraping complete"
             print(msg); await push_log(msg)
@@ -424,7 +510,3 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
 
         finally:
             await disconnect_from_mongo()
-            try:
-                shutil.rmtree(temp_dir)
-            except Exception:
-                pass

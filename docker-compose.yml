@@ -150,6 +150,7 @@ services:
     volumes:
       - meeting_bot_recordings:/app/recordings
       - pulse-socket:/var/run/pulse    # PulseAudio socket exposed here for TTS
+      - chrome_profile:/app/chrome_profile  # Persistent Chrome login/cookies
     networks:
       - interview-net
     restart: unless-stopped
@@ -184,6 +185,7 @@ volumes:
   mongodb_data:
   meeting_bot_recordings:
   pulse-socket:      # Shared between meeting-bot (PulseAudio server) and tts (client)
+  chrome_profile:    # Persistent Chrome profile (login, cookies) across container restarts
 
 # ══════════════════════════════════════════════════════════════════════
 # Networks

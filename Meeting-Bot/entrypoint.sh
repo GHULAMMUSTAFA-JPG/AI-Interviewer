@@ -23,13 +23,17 @@ Xvfb :99 -screen 0 1280x720x24 -ac +extension GLX +render -noreset &
 export DISPLAY=:99
 sleep 1
 
+echo "[entrypoint] Setting desktop background..."
+xsetroot -display :99 -solid '#1e3a5f' || true   # dark blue — visible proof VNC is connected
+
 echo "[entrypoint] Starting x11vnc on port 5900..."
 x11vnc -display :99 -nopw -forever -shared \
     -listen 0.0.0.0 -rfbport 5900 \
     -bg -q -xkb 2>/dev/null || true
 
 echo "[entrypoint] Starting noVNC on port 6080..."
-websockify --web=/usr/share/novnc/ \
+# index.html is baked into /opt/novnc at build time (no runtime copy needed).
+websockify --web=/opt/novnc \
     --wrap-mode=ignore \
     6080 localhost:5900 &
 
@@ -49,6 +53,6 @@ pactl load-module module-virtual-source \
 pactl set-default-sink virtual_mic || true
 pactl set-default-source virtual_mic_source || true
 
-echo "[entrypoint] VNC ready at :5900 — open http://localhost:6080/vnc.html"
+echo "[entrypoint] VNC ready — open http://localhost:6080/ (auto-connects, scales to fit)"
 echo "[entrypoint] PulseAudio ready. Starting Meeting-Bot..."
 exec python3 main.py

@@ -39,12 +39,22 @@ RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add
 RUN apt-get install -y \
     xvfb \
     x11vnc \
-    novnc \
     websockify \
     pulseaudio \
     pulseaudio-utils \
     alsa-utils \
     ffmpeg
+
+# Download noVNC v1.4.0 at build time so the files are baked into the image.
+# Runtime copying (cp at entrypoint) causes Chrome ERR_CACHE_READ_FAILURE
+# because the same URLs serve different file content across container rebuilds.
+RUN wget -qO /tmp/novnc.tar.gz \
+      https://github.com/novnc/noVNC/archive/refs/tags/v1.4.0.tar.gz && \
+    tar -xzf /tmp/novnc.tar.gz -C /opt && \
+    mv /opt/noVNC-1.4.0 /opt/novnc && \
+    rm /tmp/novnc.tar.gz
+
+COPY novnc_index.html /opt/novnc/index.html
 
 RUN apt-get install -y \
     libnss3 \

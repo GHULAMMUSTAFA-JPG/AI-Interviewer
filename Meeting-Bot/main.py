@@ -74,6 +74,18 @@ async def main() -> None:
     msg = "Meeting-Bot started — watching interviews.interviews for new meetings"
     print(msg); await push_log(msg)
 
+    # Tracks interview_ids that currently have an active bot task.
+    # Prevents spawning a second browser if the container restarts while a
+    # meeting is still in_progress, or if the same interview_id is inserted twice.
+    _active: set[str] = set()
+
+    async def _run_and_release(interview: dict) -> None:
+        interview_id = str(interview.get("interview_id", interview.get("_id", "unknown")))
+        try:
+            await run_bot(interview)
+        finally:
+            _active.discard(interview_id)
+
     pipeline = [{"$match": {"operationType": "insert"}}]
 
     async with db.interviews.watch(pipeline) as stream:
@@ -84,11 +96,29 @@ async def main() -> None:
             interview = change["fullDocument"]
             status = interview.get("status", "")
 
-            # Only act on in_progress interviews
             if status != "in_progress":
                 continue
 
-            asyncio.create_task(run_bot(interview))
+            interview_id = str(interview.get("interview_id", interview.get("_id", "unknown")))
+
+            # Skip if a bot is already running for this interview
+            if interview_id in _active:
+                msg = f"Bot already active for {interview_id} — skipping duplicate"
+                print(msg); await push_log(msg)
+                continue
+
+            # Also check DB: if bot_status is already set, another instance already joined
+            existing = await db.interviews.find_one(
+                {"interview_id": interview_id},
+                projection={"bot_status": 1}
+            )
+            if existing and existing.get("bot_status"):
+                msg = f"bot_status already set for {interview_id} — skipping"
+                print(msg); await push_log(msg)
+                continue
+
+            _active.add(interview_id)
+            asyncio.create_task(_run_and_release(interview))
 
     client.close()
     msg = "Meeting-Bot stopped"
