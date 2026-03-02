@@ -370,6 +370,31 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                         print(msg); await push_log(msg)
                         return
 
+                    # ── Interruption signal ───────────────────────────────────
+                    # If the bot is currently speaking (TTS is playing audio),
+                    # tell TTS to stop immediately by setting tts_interrupt=True.
+                    # TTS watches for this flag via a MongoDB change stream and
+                    # stops the pacat audio stream mid-chunk.
+                    # This fires on the FIRST caption chunk so the bot stops
+                    # as soon as the candidate opens their mouth — before the
+                    # full utterance is even buffered.
+                    try:
+                        db = mongo_handler.get_db()
+                        if db is not None:
+                            interview_doc = await db.interviews.find_one(
+                                {"interview_id": interview_id},
+                                projection={"bot_speaking": 1},
+                            )
+                            if interview_doc and interview_doc.get("bot_speaking"):
+                                await db.interviews.update_one(
+                                    {"interview_id": interview_id},
+                                    {"$set": {"tts_interrupt": True}},
+                                )
+                                msg = f"Interrupt signal sent — bot was speaking, candidate started"
+                                print(msg); await push_log(msg)
+                    except Exception as interrupt_err:
+                        print(f"Interrupt signal error (non-fatal): {interrupt_err}")
+
                     # Initialise buffer slot for first caption from this speaker
                     if speaker not in _utterance_buffers:
                         _utterance_buffers[speaker] = {"parts": [], "timer": None}
