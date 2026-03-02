@@ -118,9 +118,16 @@ cleanup_stale_resources() {
     pkill -9 pulseaudio 2>/dev/null || true
     pkill -9 websockify 2>/dev/null || true
     
-    # Remove stale PulseAudio socket
-    rm -f "$PULSE_SOCKET" 2>/dev/null || true
-    rm -f /var/run/pulse/pid 2>/dev/null || true
+    # Fix PulseAudio runtime directory.
+    # /var/run/pulse is a Docker volume so it cannot be deleted, but the .config
+    # subdirectory inside it can be created during image build with the wrong UID
+    # (106 instead of pulse=105). This causes module-native-protocol-unix to fail
+    # loading the auth cookie and never create the native socket.
+    # Fix: clear stale files, fix ownership so pulse user can write.
+    rm -f /var/run/pulse/native /var/run/pulse/pid 2>/dev/null || true
+    rm -rf /var/run/pulse/.config 2>/dev/null || true
+    chown -R pulse:pulse /var/run/pulse 2>/dev/null || true
+    chmod 755 /var/run/pulse
     
     # Clean Chrome profile locks (prevents "profile in use" errors)
     if [ -d "/app/chrome_profile" ]; then
