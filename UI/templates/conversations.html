@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Interviews — AI Interviewer</title>
+<style>
+  body { font-family: sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; background: #f5f5f5; }
+  h1 { color: #1e3a5f; }
+  a { color: #1e3a5f; }
+  table { width: 100%; border-collapse: collapse; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.1); }
+  th { background: #1e3a5f; color: #fff; padding: 10px 14px; text-align: left; }
+  td { padding: 10px 14px; border-bottom: 1px solid #eee; }
+  tr:hover td { background: #f0f4f8; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.8em; }
+  .in_progress { background: #d4edda; color: #155724; }
+  .abandoned   { background: #f8d7da; color: #721c24; }
+  .completed   { background: #cce5ff; color: #004085; }
+  .nav { margin-bottom: 20px; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="/">← New interview</a></div>
+<h1>All Interviews</h1>
+<table>
+  <thead>
+    <tr>
+      <th>Started</th>
+      <th>Interview ID</th>
+      <th>Status</th>
+      <th>Phase</th>
+      <th>Turns</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for iv in interviews %}
+    <tr>
+      <td>{{ iv.started_at.strftime('%Y-%m-%d %H:%M') if iv.started_at else '—' }}</td>
+      <td style="font-size:0.85em; font-family:monospace">{{ iv.interview_id[:16] }}...</td>
+      <td><span class="badge {{ iv.status }}">{{ iv.status }}</span></td>
+      <td>{{ iv.phase or '—' }}</td>
+      <td>{{ iv.turn_count or 0 }}</td>
+      <td><a href="/conversation/{{ iv.interview_id }}">View</a></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" style="text-align:center;color:#888">No interviews yet</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</body>
+</html>

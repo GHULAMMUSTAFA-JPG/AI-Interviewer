@@ -9,6 +9,7 @@ Key differences from STT/bot_logic.py:
 """
 
 import asyncio
+import re
 from pathlib import Path
 from datetime import datetime
 from playwright.async_api import async_playwright
@@ -367,6 +368,15 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                     # (single words, punctuation bursts, ambient sound artefacts).
                     if len(text) < 10 and len(text.split()) < 3:
                         msg = f"Noise filter: skipped [{speaker}]: {text!r}"
+                        print(msg); await push_log(msg)
+                        return
+
+                    # Skip Google Meet meeting-code artefacts.
+                    # These appear as "AM abc-def-ghi abc-def-ghi" — the meeting
+                    # URL slug repeated twice with an "AM" prefix.
+                    # Pattern: 2–3 letter prefix + hyphenated code (repeated).
+                    if re.match(r'^[A-Z]{2,3}\s+[a-z]+-[a-z]+-[a-z]+', text):
+                        msg = f"Noise filter: meet-code skipped [{speaker}]: {text!r}"
                         print(msg); await push_log(msg)
                         return
 

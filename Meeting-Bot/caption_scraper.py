@@ -113,6 +113,13 @@ _UI_NOISE = [
     "this call is being",
     "everyone will see",
     "chat with everyone",
+    # Google Meet meeting-code caption artefacts ("AM abc-def-ghi abc-def-ghi")
+    "live captions have been turned",
+    "captions have been turned",
+    "current language is",
+    # Meeting code line — starts with "AM " followed by the meet code repeated
+    # Can't regex here so catch the repeated-code pattern via length+alpha heuristic
+    # (handled in bot.py noise filter instead — see on_caption())
 ]
 
 # ── JavaScript: extract all visible caption blocks from Meet DOM ───

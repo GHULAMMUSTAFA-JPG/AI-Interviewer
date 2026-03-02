@@ -119,3 +119,38 @@ async def stop_interview(interview_id: str = Path(...)):
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Interview not found")
     return JSONResponse({"status": "stopped", "interview_id": interview_id})
+
+
+@app.get("/conversations", response_class=HTMLResponse)
+async def list_conversations(request: Request):
+    """List all interviews with links to their conversation view."""
+    db = _get_db()
+    interviews = await db["interviews"].find(
+        {},
+        {"interview_id": 1, "status": 1, "started_at": 1, "phase": 1, "turn_count": 1, "_id": 0},
+    ).sort("started_at", -1).to_list(length=100)
+    return templates.TemplateResponse(
+        "conversations.html", {"request": request, "interviews": interviews}
+    )
+
+
+@app.get("/conversation/{interview_id}", response_class=HTMLResponse)
+async def view_conversation(request: Request, interview_id: str = Path(...)):
+    """Show the full transcript for one interview. Auto-refreshes every 5s while in_progress."""
+    db = _get_db()
+    interview = await db["interviews"].find_one(
+        {"interview_id": interview_id},
+        {"interview_id": 1, "status": 1, "started_at": 1, "phase": 1, "turn_count": 1, "_id": 0},
+    )
+    if not interview:
+        raise HTTPException(status_code=404, detail="Interview not found")
+
+    messages = await db["transcripts"].find(
+        {"interview_id": interview_id},
+        {"speaker": 1, "text": 1, "timestamp": 1, "_id": 0},
+    ).sort("timestamp", 1).to_list(length=None)
+
+    return templates.TemplateResponse(
+        "conversation.html",
+        {"request": request, "interview": interview, "messages": messages},
+    )
