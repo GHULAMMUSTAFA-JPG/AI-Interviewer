@@ -1,0 +1,18 @@
+{
+  "_id": "65f1a2b3c4d5e6f7g8h9i0j1",
+  "candidate_id": "65f1a2b3c4d5e6f7g8h9i0j2",
+  "job_id": "65f1a2b3c4d5e6f7g8h9i0j3",
+  "status": "in_progress",
+  "phase": "INTRO",
+  "turn_count": 0,
+  "conversation_summary": "",
+  "started_at": "2026-02-18T10:00:00Z",
+  "ended_at": null,
+  "limits": {
+    "max_duration_hit": false,
+    "context_overflow": false,
+    "forced_end_reason": null
+  },
+  "created_at": "2026-02-18T09:55:00Z",
+  "updated_at": "2026-02-18T10:00:00Z"
+}

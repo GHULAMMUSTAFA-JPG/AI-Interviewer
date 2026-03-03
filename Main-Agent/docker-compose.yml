@@ -1,0 +1,98 @@
+# -------------------------------------------------------
+# AI Interview Agent — Docker Compose
+#
+# Services:
+#   mongodb        — MongoDB 7 with replica set (required for change streams)
+#   mongo-init     — One-shot container that calls rs.initiate() on first run
+#   interview-agent — The AI interview agent
+#
+# Usage:
+#   docker compose up -d
+#
+# Seed the database (run once from host after containers are up):
+#   python setup_db.py
+#
+# Other microservices can join the shared network:
+#   networks:
+#     - interview-net
+#   (set external: true in their compose if defined separately)
+# -------------------------------------------------------
+
+services:
+
+  # ----------------------------------
+  # MongoDB with replica set
+  # Change streams require a replica set — even a single-node one.
+  # ----------------------------------
+  mongodb:
+    image: mongo:7.0
+    container_name: mongodb
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "27017:27017"   # Expose to host so setup_db.py can be run locally
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - interview-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # ----------------------------------
+  # One-shot: initialise the replica set on first boot.
+  # Idempotent — safe to re-run (tries rs.status() first).
+  # ----------------------------------
+  mongo-init:
+    image: mongo:7.0
+    container_name: mongo-init
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    entrypoint: >
+      mongosh --host mongodb:27017 --quiet --eval
+      "try { rs.status(); print('rs0 already initialised'); }
+       catch(e) { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'mongodb:27017' }] });
+                  print('rs0 initialised'); }"
+    networks:
+      - interview-net
+    restart: "no"
+
+  # ----------------------------------
+  # AI Interview Agent
+  # ----------------------------------
+  interview-agent:
+    build: .
+    container_name: interview-agent
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      # Override the URI from .env so the agent talks to the container,
+      # not localhost. Keep replicaSet param for change stream support.
+      - MONGODB_URI=mongodb://mongodb:27017/?replicaSet=rs0
+    networks:
+      - interview-net
+    restart: unless-stopped
+
+# ----------------------------------
+# Volumes
+# ----------------------------------
+volumes:
+  mongodb_data:
+
+# ----------------------------------
+# Networks
+# Stable name so other microservice compose files can attach via:
+#   networks:
+#     interview-net:
+#       external: true
+# ----------------------------------
+networks:
+  interview-net:
+    name: interview-net
+    driver: bridge

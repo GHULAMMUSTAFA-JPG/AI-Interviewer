@@ -9,8 +9,7 @@ AI Interviwer/
 ├── Main-Agent/             ← LLM brain (Python + pip, Gemini/OpenAI/Anthropic)
 ├── TTS/                    ← Text-to-speech (Python + uv, ElevenLabs + sounddevice)
 ├── Meeting-Bot/            ← Chrome bot + caption scraper (Playwright, Ubuntu)
-├── UI/                     ← Web form (FastAPI + Jinja2)
-└── STT/                    ← Legacy standalone tool (not part of the pipeline)
+└── UI/                     ← Web form (FastAPI + Jinja2)
 ```
 
 Each service has its own `CLAUDE.md` with file-level details. Read those when
@@ -55,12 +54,6 @@ cp .env.example .env
 docker compose up --build
 # Open http://localhost:8080
 ```
-
-## Why STT/ is not in the compose
-STT is a one-shot CLI tool (`python main.py --url ... --email ...`).
-It writes to `Ai.*` collections which are NOT part of the interview pipeline.
-Meeting-Bot replaces it entirely — same Chrome + caption scraper logic,
-but persistent (change stream driven) and writing to `interviews.transcripts`.
 
 ## Change stream filter summary
 | Service | Watches | Filter |

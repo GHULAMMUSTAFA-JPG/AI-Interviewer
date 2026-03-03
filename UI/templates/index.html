@@ -99,6 +99,7 @@
             Interview ID: <code>${json.interview_id}</code><br/><br/>
             <button id="leaveBtn" class="leave-btn" onclick="leaveInterview()">Leave Meeting</button>
           `;
+          startStatusPolling(json.interview_id);
         } else {
           throw new Error(JSON.stringify(json));
         }
@@ -110,6 +111,33 @@
       }
     });
 
+    let _statusPoller = null;
+
+    function startStatusPolling(interviewId) {
+      _statusPoller = setInterval(async () => {
+        try {
+          const res = await fetch(`/status/${interviewId}`);
+          if (!res.ok) return;
+          const json = await res.json();
+          if (json.status !== 'in_progress') {
+            stopStatusPolling();
+            resetForm(json.status);
+          }
+        } catch (_) { /* ignore network blips */ }
+      }, 3000);
+    }
+
+    function stopStatusPolling() {
+      if (_statusPoller) { clearInterval(_statusPoller); _statusPoller = null; }
+    }
+
+    function resetForm(endStatus) {
+      currentInterviewId = null;
+      btn.disabled = false;
+      btn.textContent = 'Start Interview';
+      result.className = 'result hidden';
+    }
+
     async function leaveInterview() {
       if (!currentInterviewId) return;
       const leaveBtn = document.getElementById('leaveBtn');
@@ -119,6 +147,7 @@
         const res = await fetch(`/stop/${currentInterviewId}`, { method: 'POST' });
         const json = await res.json();
         if (json.status === 'stopped') {
+          stopStatusPolling();
           leaveBtn.textContent = 'Left Meeting';
           leaveBtn.classList.add('left');
           currentInterviewId = null;

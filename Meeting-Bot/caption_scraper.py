@@ -85,6 +85,9 @@ _UI_NOISE = [
     "return to home screen",
     "meeting ended",
     "you left the meeting",
+    "has left the meeting",
+    "has joined the meeting",
+    "joined the meeting",
     "joining the meeting",
     "ask to join",
     "join now",
@@ -222,7 +225,20 @@ _CAPTION_JS = r"""
         }
     }
 
-    // ── Strategy 4: bottom-viewport caption overlay (fallback) ───
+    // ── Strategy 4b: any element with role="log" or aria-live (broader) ──
+    // Newer Meet versions may use different jsname values. Cast a wider net.
+    for (const el of document.querySelectorAll('[role="log"], [aria-live="assertive"]')) {
+        const t = (el.innerText || '').trim();
+        if (!t || isNoise(t)) continue;
+        const lines = t.split('\n').map(l => l.trim()).filter(Boolean);
+        if (lines.length >= 2) {
+            add(lines[0], lines.slice(1).join(' '));
+        } else if (lines.length === 1 && lines[0].length > 8) {
+            add('Unknown', lines[0]);
+        }
+    }
+
+    // ── Strategy 5: bottom-viewport caption overlay (fallback) ───
     const vh = window.innerHeight;
     for (const el of document.querySelectorAll('div[class]')) {
         const b = el.getBoundingClientRect();
@@ -398,13 +414,24 @@ class CaptionScraper:
                 loc = self._ctx.locator(sel)
                 if await loc.count() > 0 and await loc.first.is_visible():
                     return True
-            # Signal 2: jsname caption text nodes present with actual text
-            for jn in ['YSxPC', 'tgaKEf']:
+            # Signal 2: jsname caption container nodes — presence alone is enough.
+            # Right after enabling, nobody may be speaking yet but the container
+            # exists in the DOM. Requiring text caused a false-negative every time.
+            for jn in ['YSxPC', 'tgaKEf', 'BjGdaf', 'Qrt5E']:
                 nodes = self._ctx.locator(f'[jsname="{jn}"]')
                 if await nodes.count() > 0:
-                    text = (await nodes.first.inner_text()).strip()
-                    if text:
+                    return True
+            # Signal 3: newer Meet versions use a labelled region
+            for sel in [
+                '[aria-label*="Captions" i][role="region"]',
+                '[aria-label*="Live caption" i]',
+            ]:
+                try:
+                    loc = self._ctx.locator(sel)
+                    if await loc.count() > 0 and await loc.first.is_visible():
                         return True
+                except Exception:
+                    pass
         except Exception:
             pass
         return False
@@ -418,6 +445,8 @@ class CaptionScraper:
             msg = "   ✅ Captions already on"
             print(msg); await push_log(msg)
             return True
+
+        _shortcut_sent = False  # Only send 'c' once — it's a toggle, not idempotent
 
         for attempt in range(1, ENABLE_RETRIES + 1):
             msg = f"   🔄 Caption enable attempt {attempt}/{ENABLE_RETRIES}..."
@@ -538,21 +567,25 @@ class CaptionScraper:
                 print(msg); await push_log(msg)
 
             # ── Strategy 4: keyboard shortcut 'c' ─────────────────
-            # Must click the page body first to ensure focus is on Meet
-            try:
-                await self.page.mouse.click(400, 300)
-                await asyncio.sleep(0.3)
-                await self.page.keyboard.press("c")
-                await asyncio.sleep(1.5)
-                msg = f"   ⌨️  Shortcut 'c' sent"
-                print(msg); await push_log(msg)
-                if await self._captions_already_on():
-                    msg = "   ✅ Captions confirmed on after shortcut"
+            # Must click the page body first to ensure focus is on Meet.
+            # Only sent ONCE — 'c' is a toggle; pressing it a second time
+            # would turn captions back off.
+            if not _shortcut_sent:
+                try:
+                    await self.page.mouse.click(400, 300)
+                    await asyncio.sleep(0.3)
+                    await self.page.keyboard.press("c")
+                    _shortcut_sent = True
+                    await asyncio.sleep(2.5)  # give Meet time to enable captions
+                    msg = f"   ⌨️  Shortcut 'c' sent"
                     print(msg); await push_log(msg)
-                    return True
-            except Exception as e:
-                msg = f"   ⚠️  Keyboard shortcut error: {e}"
-                print(msg); await push_log(msg)
+                    if await self._captions_already_on():
+                        msg = "   ✅ Captions confirmed on after shortcut"
+                        print(msg); await push_log(msg)
+                        return True
+                except Exception as e:
+                    msg = f"   ⚠️  Keyboard shortcut error: {e}"
+                    print(msg); await push_log(msg)
 
             await asyncio.sleep(2)
 

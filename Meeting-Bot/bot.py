@@ -135,6 +135,7 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                 channel="chrome",
                 viewport={"width": 1280, "height": 720},
                 args=chrome_args,
+                env={"DISPLAY": ":99"},  # Explicit Xvfb display — makes Chrome visible in VNC
                 accept_downloads=False,
                 ignore_default_args=["--enable-automation"],
             )
@@ -460,6 +461,23 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                 if remaining and mongo_connected:
                     await insert_transcript(interview_id, "candidate", remaining)
                     msg = f"Final flush [{speaker}]: {remaining[:80]}"
+                    print(msg); await push_log(msg)
+
+            # ── Mark interview as abandoned if still in_progress ──────────
+            # Covers the case where the bot was kicked / meeting ended
+            # externally without going through the UI's Leave button.
+            db = mongo_handler.get_db()
+            if db is not None:
+                current = await db.interviews.find_one(
+                    {"interview_id": interview_id},
+                    projection={"status": 1}
+                )
+                if current and current.get("status") == "in_progress":
+                    await db.interviews.update_one(
+                        {"interview_id": interview_id},
+                        {"$set": {"status": "abandoned", "ended_at": datetime.utcnow()}}
+                    )
+                    msg = "Interview marked abandoned — bot left meeting"
                     print(msg); await push_log(msg)
 
             try:

@@ -121,6 +121,19 @@ async def stop_interview(interview_id: str = Path(...)):
     return JSONResponse({"status": "stopped", "interview_id": interview_id})
 
 
+@app.get("/status/{interview_id}")
+async def interview_status(interview_id: str = Path(...)):
+    """Return current status of an interview (for UI polling)."""
+    db = _get_db()
+    doc = await db["interviews"].find_one(
+        {"interview_id": interview_id},
+        {"status": 1, "_id": 0},
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Interview not found")
+    return JSONResponse({"status": doc.get("status")})
+
+
 @app.get("/conversations", response_class=HTMLResponse)
 async def list_conversations(request: Request):
     """List all interviews with links to their conversation view."""
