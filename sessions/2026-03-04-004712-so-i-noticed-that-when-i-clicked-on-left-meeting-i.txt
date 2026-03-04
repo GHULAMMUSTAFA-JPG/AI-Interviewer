@@ -1,0 +1,92 @@
+
+ ▐▛███▜▌   Claude Code v2.1.63
+▝▜█████▛▘  Sonnet 4.6 · Claude Pro
+  ▘▘ ▝▝    D:\PF-24.2\AI Interviwer
+
+❯ so i noticed that when i clicked on left meeting it didnot left the       
+  meeting and did 3-4 minutes later                                         
+
+● Let me look at the Meeting-Bot code to understand how "left meeting" is
+  handled.
+
+● Searched for 1 pattern, read 3 files (ctrl+o to expand)
+
+● Now let me check the UI to see what "Left Meeting" sets in MongoDB.
+
+● Searched for 1 pattern, read 1 file (ctrl+o to expand)
+  ⎿  Loaded UI\CLAUDE.md
+
+● Let me check the UI templates to see how the "Left Meeting" button works.
+
+● Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Found it. There are two issues causing the delay:
+
+  1. _watch_for_leave polls every 5 seconds — but that alone isn't 3-4 minutes
+  2. The Leave button click may fail silently — if the Google Meet aria-label
+  doesn't match any of the 3 selectors, _watch_for_leave returns without the
+  browser actually leaving the meeting. The Python tasks are cancelled, but
+  Chrome stays connected to the Meet session until the ctx.close() eventually
+  resolves or Chrome times out on its own (hence the 3-4 minute window)
+
+  The fix: reduce polling to 1 second, and add a guaranteed
+  page.goto("about:blank") fallback after the button click attempt — this
+  navigates Chrome away from Meet regardless of whether the button click worked.
+
+● Update(Meeting-Bot\bot.py)
+  ⎿  Added 13 lines, removed 4 lines
+      26  
+      27  async def _watch_for_leave(interview_id: str, page) -> None:
+      28      """
+      29 -    Background task: polls interviews.interviews every 5 s. Whe
+         -n status becomes                                               
+      30 -    'abandoned' or 'completed', clicks the Leave call button an
+         -d exits — which                                                
+      31 -    cancels the sibling tasks (caption scraper + audio watcher)
+         -.                                                              
+      29 +    Background task: polls interviews.interviews every 1 s. Whe
+         +n status becomes                                               
+      30 +    'abandoned' or 'completed', clicks the Leave call button an
+         +d navigates away                                               
+      31 +    as a guaranteed fallback — which cancels the sibling tasks 
+         +(caption scraper                                               
+      32 +    + audio watcher).                                          
+      33      """
+      34      while True:
+      34 -        await asyncio.sleep(5)                                 
+      35 +        await asyncio.sleep(1)                                 
+      36          try:
+      37              db = mongo_handler.get_db()
+      38              if db is None:
+     ...
+      60                      except Exception:
+      61                          pass
+      62  
+      63 +                # Guaranteed fallback: navigate away from the M
+         +eet URL so Chrome                                              
+      64 +                # disconnects from the meeting even if the butt
+         +on click failed or                                             
+      65 +                # a confirmation dialog was shown.             
+      66 +                try:                                           
+      67 +                    await page.goto("about:blank", timeout=5000
+         +)                                                              
+      68 +                except Exception:                              
+      69 +                    pass                                       
+      70 +                                                               
+      71                  return  # completes the task; asyncio.wait canc
+          els siblings
+      72  
+      73          except asyncio.CancelledError:
+
+● Two changes made to bot.py:
+
+  1. Polling interval: 5s → 1s — the watcher now reacts within ~1 second of the
+  status change instead of up to 5 seconds.
+  2. page.goto("about:blank") fallback — after attempting the Leave button
+  click, Chrome is forcibly navigated away from the Meet URL. This is the key
+  fix: even if all 3 button selectors fail (e.g. Google Meet updated its DOM and
+   the aria-labels changed), the browser disconnects from the meeting
+  immediately rather than staying connected until Chrome eventually times out
+  3-4 minutes later.
+
+✻ Worked for 5m 57s

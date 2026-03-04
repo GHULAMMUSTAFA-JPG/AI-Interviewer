@@ -26,12 +26,13 @@ from mongo_handler import (
 
 async def _watch_for_leave(interview_id: str, page) -> None:
     """
-    Background task: polls interviews.interviews every 5 s. When status becomes
-    'abandoned' or 'completed', clicks the Leave call button and exits — which
-    cancels the sibling tasks (caption scraper + audio watcher).
+    Background task: polls interviews.interviews every 1 s. When status becomes
+    'abandoned' or 'completed', clicks the Leave call button and navigates away
+    as a guaranteed fallback — which cancels the sibling tasks (caption scraper
+    + audio watcher).
     """
     while True:
-        await asyncio.sleep(5)
+        await asyncio.sleep(1)
         try:
             db = mongo_handler.get_db()
             if db is None:
@@ -58,6 +59,14 @@ async def _watch_for_leave(interview_id: str, page) -> None:
                             break
                     except Exception:
                         pass
+
+                # Guaranteed fallback: navigate away from the Meet URL so Chrome
+                # disconnects from the meeting even if the button click failed or
+                # a confirmation dialog was shown.
+                try:
+                    await page.goto("about:blank", timeout=5000)
+                except Exception:
+                    pass
 
                 return  # completes the task; asyncio.wait cancels siblings
 
