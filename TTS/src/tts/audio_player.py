@@ -49,6 +49,7 @@ class AudioPlayer:
             "--format=s16le",
             f"--rate={config.sample_rate}",
             f"--channels={config.channels}",
+            "--latency-msec=50",   # Reduce PulseAudio buffer: ~200 ms → 50 ms
         ]
 
         logger.info(
@@ -63,11 +64,13 @@ class AudioPlayer:
 
         self._is_playing = True
         bytes_written = 0
+        interrupted = False
 
         try:
             async for chunk in audio_chunks:
                 if stop_event.is_set():
                     logger.info("Interrupt detected during playback")
+                    interrupted = True
                     break
 
                 if not chunk:
@@ -78,8 +81,18 @@ class AudioPlayer:
                 bytes_written += len(chunk)
 
             proc.stdin.close()
-            await proc.wait()
-            logger.info(f"Playback complete ({bytes_written} bytes written)")
+
+            if interrupted:
+                # Kill pacat immediately so buffered audio doesn't keep playing
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                logger.info(f"Playback interrupted ({bytes_written} bytes written)")
+            else:
+                await proc.wait()
+                logger.info(f"Playback complete ({bytes_written} bytes written)")
 
         except Exception:
             raise

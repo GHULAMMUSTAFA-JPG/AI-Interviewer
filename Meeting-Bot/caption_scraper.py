@@ -53,11 +53,13 @@ from pathlib import Path
 from logger import push_log
 
 # ── Configuration ──────────────────────────────────────────────────
-POLL_INTERVAL     = 1.0   # seconds between DOM polls
-STABILIZATION_SEC = 1.5   # seconds a caption must be unchanged before saving
-SILENT_WARN_SEC   = 30    # log a warning after this many silent seconds
-ENABLE_RETRIES    = 5     # caption-toggle attempts
-TRANSCRIPT_DIR    = Path("transcription_recordings")
+POLL_INTERVAL          = 0.5   # seconds between DOM polls (was 1.0 — halved for faster interrupt detection)
+STABILIZATION_SEC      = 1.5   # seconds a caption must be unchanged before saving
+SILENT_WARN_SEC        = 30    # log a warning after this many silent seconds
+ENABLE_RETRIES         = 5     # caption-toggle attempts
+TRANSCRIPT_DIR         = Path("transcription_recordings")
+HASH_DEDUP_WINDOW_SEC  = 15.0  # same text within 15 s = duplicate; after 15 s = treat as new
+SPEAKER_RESET_SEC      = 20.0  # if speaker silent this long, allow same text to be re-committed
 
 # Strings that identify Google Meet UI messages — NOT spoken captions.
 # Any extracted text containing one of these sub-strings is discarded.
@@ -305,8 +307,10 @@ class CaptionScraper:
         self.pending_unknown = {}
 
         # ── Duplicate prevention ───────────────────────────────────
-        # SHA-1 hashes of every text we have already committed to disk/DB.
-        self.saved_hashes = set()
+        # { hash: commit_monotonic_time } — TTL-based dedup.
+        # Entries expire after HASH_DEDUP_WINDOW_SEC so candidates can repeat
+        # an identical sentence after a pause and still get a response.
+        self.saved_hashes: dict = {}
 
         self.stabilization_delay = STABILIZATION_SEC
         self.captured   = 0
@@ -335,6 +339,20 @@ class CaptionScraper:
         s = s.lower()
         s = re.sub(r"[^\w\s]", "", s)
         return re.sub(r"\s+", " ", s).strip()
+
+    def _has_saved_hash(self, h: str) -> bool:
+        """Return True only if hash was committed within HASH_DEDUP_WINDOW_SEC."""
+        t = self.saved_hashes.get(h)
+        if t is None:
+            return False
+        if self._now() - t > HASH_DEDUP_WINDOW_SEC:
+            del self.saved_hashes[h]
+            return False
+        return True
+
+    def _add_saved_hash(self, h: str) -> None:
+        """Record hash with current commit time (TTL-based)."""
+        self.saved_hashes[h] = self._now()
 
     @classmethod
     def _is_continuation(cls, prev, new_text):
@@ -725,6 +743,10 @@ class CaptionScraper:
 
         # Case 1: nothing changed
         if text == prev:
+            # After SPEAKER_RESET_SEC of inactivity, clear last_saved_text so the
+            # same sentence can be re-committed (handles candidate repeating a question).
+            if self._now() - buf.get("last_change_time", self._now()) > SPEAKER_RESET_SEC:
+                buf["last_saved_text"] = ""
             return
 
         # Case 2: shorter → transient UI glitch or rolling reset, ignore
@@ -818,11 +840,11 @@ class CaptionScraper:
                 prev_ts, prev_sp, _ = self._transcript_lines[ext_idx]
                 self._transcript_lines[ext_idx] = [prev_ts, prev_sp, text]
                 self._rewrite_file()
-                self.saved_hashes.add(h)
+                self._add_saved_hash(h)
                 buf["last_saved_text"] = text
                 return 0
             # If already saved or already pending, skip
-            if h in self.saved_hashes or h in self.pending_unknown:
+            if self._has_saved_hash(h) or h in self.pending_unknown:
                 buf["last_saved_text"] = text
                 return 0
             # Park it — a real name may arrive shortly
@@ -839,7 +861,7 @@ class CaptionScraper:
                 del self.pending_unknown[uh]
 
         # Already committed under any speaker name
-        if h in self.saved_hashes:
+        if self._has_saved_hash(h):
             buf["last_saved_text"] = text
             return 0
 
@@ -857,7 +879,7 @@ class CaptionScraper:
           4. Register hash to prevent future duplicates
         """
         h = self._text_hash(text)
-        if h in self.saved_hashes:
+        if self._has_saved_hash(h):
             return 0
 
         # If the new text extends an already-committed line, update in-place.
@@ -868,12 +890,12 @@ class CaptionScraper:
             keep_sp = prev_sp if prev_sp != "Unknown" else speaker
             self._transcript_lines[ext_idx] = [prev_ts, keep_sp, text]
             self._rewrite_file()
-            self.saved_hashes.add(h)
+            self._add_saved_hash(h)
             msg = f"📄 Updated line (extended) [{keep_sp}]: {text[:70]}"
             print(msg); await push_log(msg)
             return 0
 
-        self.saved_hashes.add(h)
+        self._add_saved_hash(h)
 
         self.captured   += 1
         self.silent_sec  = 0
@@ -911,7 +933,7 @@ class CaptionScraper:
 
     # ── Main scrape loop ──────────────────────────────────────────
 
-    async def scrape_loop(self, session_id, on_caption=None):
+    async def scrape_loop(self, session_id, on_caption=None, on_speech_start=None):
         """
         Poll for captions until the meeting ends.
 
@@ -920,9 +942,12 @@ class CaptionScraper:
           2. Calls    await on_caption(doc)  → MongoDB persistence
 
         Args:
-            session_id:  unique session identifier (e.g. "20260224_144700")
-            on_caption:  async callback receiving:
-                         { session_id, timestamp, speaker, text }
+            session_id:     unique session identifier (e.g. "20260224_144700")
+            on_caption:     async callback receiving:
+                            { session_id, timestamp, speaker, text }
+            on_speech_start: optional async callback fired immediately when a
+                            speaker's DOM text changes (before stabilization).
+                            Receives { speaker, text }.  Used for early interrupt.
         """
         # Thin wrapper: inject session_id before hitting the callback
         _upstream = on_caption
@@ -956,7 +981,14 @@ class CaptionScraper:
 
                 # Step 2: feed each into the per-speaker stabilization buffer
                 for speaker, text in raw:
+                    # Capture text BEFORE update to detect new/changed text
+                    prev_text = (self.speaker_buffers.get(speaker) or {}).get("current_text", "")
                     self._update_buffer(speaker, text)
+                    # Fire on_speech_start immediately when DOM text changes —
+                    # before the 1.5 s stabilization window, enabling early interrupt.
+                    new_text = (self.speaker_buffers.get(speaker) or {}).get("current_text", "")
+                    if on_speech_start and new_text and new_text != prev_text:
+                        asyncio.create_task(on_speech_start({"speaker": speaker, "text": new_text}))
 
                 # Step 3: commit any buffers that have now stabilized
                 new_saves = await self._flush_stable(_wrapped)
@@ -974,9 +1006,17 @@ class CaptionScraper:
                     print(msg); await push_log(msg)
 
                 if self.silent_sec >= SILENT_WARN_SEC:
-                    msg = f"⚠️  No new captions for {self.silent_sec:.0f}s — still listening..."
+                    msg = f"⚠️  No new captions for {self.silent_sec:.0f}s — rechecking captions..."
                     print(msg); await push_log(msg)
                     self.silent_sec = 0
+                    # Re-enable captions if they went off (Google Meet may have toggled them)
+                    try:
+                        if not await self._captions_already_on():
+                            msg = "Captions not detected — re-enabling..."
+                            print(msg); await push_log(msg)
+                            await self._enable_captions()
+                    except Exception:
+                        pass
 
                 await asyncio.sleep(POLL_INTERVAL)
 
@@ -994,7 +1034,7 @@ class CaptionScraper:
                     await self._do_write(speaker, text, _wrapped)
             # Commit any Unknown entries still in pending
             for h, (spk, txt, _) in list(self.pending_unknown.items()):
-                if h not in self.saved_hashes:
+                if not self._has_saved_hash(h):
                     await self._do_write(spk, txt, _wrapped)
 
             msg = f"✅ Scrape loop done — {self.captured} captions saved"
@@ -1003,8 +1043,8 @@ class CaptionScraper:
 
 # ── Public entry point ─────────────────────────────────────────────
 
-async def scrape_meeting_captions(page, session_id, on_caption_callback=None):
+async def scrape_meeting_captions(page, session_id, on_caption_callback=None, on_speech_start=None):
     """Create a CaptionScraper and run its scrape loop."""
     scraper = CaptionScraper(page)
-    await scraper.scrape_loop(session_id, on_caption_callback)
+    await scraper.scrape_loop(session_id, on_caption_callback, on_speech_start)
 

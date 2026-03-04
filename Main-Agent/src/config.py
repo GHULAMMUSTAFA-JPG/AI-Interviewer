@@ -63,7 +63,8 @@ TARGET_CACHE_HIT_RATE = 0.99  # 99%
 # LLM Configuration — all values controlled via .env
 GEMINI_MODEL_CONVERSATION = os.getenv("GEMINI_MODEL_CONVERSATION", "gemini-2.0-flash")
 GEMINI_MODEL_EVALUATION = os.getenv("GEMINI_MODEL_EVALUATION", "gemini-1.5-pro")
-GEMINI_MAX_OUTPUT_TOKENS = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "1000"))
+GEMINI_MAX_OUTPUT_TOKENS          = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "200"))
+GEMINI_MAX_OUTPUT_TOKENS_COMBINED = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS_COMBINED", "400"))
 GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0.7"))
 GEMINI_TOP_P = float(os.getenv("GEMINI_TOP_P", "0.9"))
 
@@ -82,27 +83,33 @@ ENABLE_FALLBACK_RESPONSES = False
 
 PHASE_INSTRUCTIONS = {
     "INTRO": (
-        "Welcome the candidate warmly and make them feel comfortable. "
-        "Ask one open-ended question to understand what draws them to this role and what they hope to bring to it."
+        "Welcome the candidate and get them talking naturally. "
+        "In the first turn, ask them to introduce themselves. "
+        "Once they do, follow up on the most interesting thing they mentioned — a project, a technology, a gap, an achievement. "
+        "Do not keep asking 'what drew you to this role' if the candidate has moved on; pick up whatever thread they opened."
     ),
     "EXPERIENCE": (
-        "Explore the candidate's work history in depth. Ask for specific examples with real outcomes — "
-        "team sizes, timelines, metrics, and the impact of their decisions. "
-        "Probe into their most significant projects and what they personally contributed."
+        "Dig into real work. When a candidate names a project or role, ask: what was your specific contribution, "
+        "what was the hardest part, what was the outcome, and what would you do differently. "
+        "Push for concrete numbers — team size, timeline, scale, impact. "
+        "If their answer is vague, ask for a specific example."
     ),
     "TECHNICAL": (
-        "Assess technical depth and problem-solving ability. Ask how they applied their technical skills "
-        "to real challenges — design decisions, trade-offs, debugging approaches, and architecture choices. "
-        "Ask follow-ups that reveal how deeply they understand the systems they built."
+        "Probe technical depth. When they mention a technology or system, ask why they chose it over alternatives, "
+        "what trade-offs they faced, and how they debugged or scaled it. "
+        "Ask follow-ups that expose whether they built it or just used it: "
+        "'What was the hardest bug you hit?' or 'How would you redesign that now?'"
     ),
     "BEHAVIORAL": (
-        "Evaluate soft skills using specific past situations. Ask about times they led a team, "
-        "resolved a conflict, handled failure, or delivered under pressure. "
-        "Follow up to understand their thought process and what they learned."
+        "Use the STAR method naturally. Ask about a real situation: "
+        "'Tell me about a time when...' then follow up on the specific actions they took and the outcome. "
+        "Good topics: a project that failed, a disagreement with a teammate, delivering under tight deadlines, "
+        "learning something difficult quickly."
     ),
     "CLOSING": (
-        "Wrap up the interview positively. Thank the candidate for their time and answers. "
-        "Invite them to ask any questions they have about the role, the team, the tech stack, or the company culture."
+        "Wrap up warmly. Thank the candidate for their time and specific answers. "
+        "Invite them to ask anything about the role, the team, the tech stack, or the company culture. "
+        "Answer their questions naturally as the hiring manager."
     ),
 }
 

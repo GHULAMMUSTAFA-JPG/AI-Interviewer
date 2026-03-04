@@ -11,6 +11,7 @@ Performance optimizations:
 from abc import ABC, abstractmethod
 from google import genai
 from google.genai import types
+import json
 import re
 import time
 import structlog
@@ -27,6 +28,7 @@ from src.config import (
     logger,
     GEMINI_MODEL_CONVERSATION,
     GEMINI_MAX_OUTPUT_TOKENS,
+    GEMINI_MAX_OUTPUT_TOKENS_COMBINED,
     GEMINI_TEMPERATURE,
     GEMINI_TOP_P,
     RETRY_MAX_ATTEMPTS,
@@ -83,6 +85,15 @@ class LLMProvider(ABC):
         Override in providers that need a separate circuit breaker for summaries.
         """
         return await self.generate(prompt)
+
+    async def generate_combined(self, prompt: str) -> dict:
+        """Generate interview response + summary in one call.
+        Default: falls back to generate() only (no summary update).
+        Override in providers that support JSON output mode.
+        Returns: {"response": str, "summary": str | None}
+        """
+        response = await self.generate(prompt)
+        return {"response": response, "summary": None}
 
 
 class GeminiProvider(LLMProvider):
@@ -155,6 +166,60 @@ class GeminiProvider(LLMProvider):
         Failures here cannot open the main interview circuit breaker.
         """
         return await summary_circuit_breaker.call(self._call_gemini, prompt)
+
+    async def _call_gemini_json(self, prompt: str) -> dict:
+        """Core Gemini API call with JSON output mode — no retry, no circuit breaker."""
+        start_time = time.perf_counter()
+        try:
+            response = await self.client.aio.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS_COMBINED,
+                    temperature=GEMINI_TEMPERATURE,
+                    top_p=GEMINI_TOP_P,
+                    response_mime_type="application/json",
+                )
+            )
+
+            if not response.text:
+                raise LLMException("Gemini returned empty JSON response")
+
+            latency_ms = (time.perf_counter() - start_time) * 1000
+            logger_struct.info(
+                "gemini_json_response_generated",
+                latency_ms=round(latency_ms, 2),
+                response_length=len(response.text),
+            )
+
+            try:
+                return json.loads(response.text)
+            except json.JSONDecodeError:
+                cleaned = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.text.strip(), flags=re.MULTILINE)
+                return json.loads(cleaned)
+
+        except LLMException:
+            raise
+        except Exception as e:
+            latency_ms = (time.perf_counter() - start_time) * 1000
+            logger_struct.error(
+                "gemini_json_generation_failed",
+                error=str(e),
+                latency_ms=round(latency_ms, 2),
+                exc_info=True
+            )
+            raise LLMException(f"Gemini JSON error: {e}")
+
+    @retry(
+        stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
+        wait=_gemini_wait,
+        retry=retry_if_exception_type(Exception),
+        before_sleep=before_sleep_log(logger_struct, logging.WARNING),
+        reraise=True
+    )
+    async def generate_combined(self, prompt: str) -> dict:
+        """ONE call returning {"response": str, "summary": str} using JSON output mode."""
+        return await llm_circuit_breaker.call(self._call_gemini_json, prompt)
 
 
 class OpenAIProvider(LLMProvider):

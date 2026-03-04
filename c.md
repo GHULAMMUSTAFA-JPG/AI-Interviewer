@@ -1,4 +1,27 @@
 ← All interviews  |  New interview
+Interview 3c41a6dd...
+abandoned Phase: INTRO Turns: 2 Started: 2026-03-04 07:11
+Hello! Welcome to your interview. Could you please start by introducing yourself?
+07:12:03
+AGENT
+Hello. I am Ghulam Mustafa and I'm from Pakistan. I'm a freshman. I create as a software engineer. and I was looking for a source with associate software, engineering job,
+07:12:44
+CANDIDATE
+Hi Ghulam, it's great to meet you and thanks for joining us today! It sounds like you're actively seeking an Associate Software Engineer role and have a passion for creating as a software engineer. To start, what specifically about this Associate Software Engineer position at TechNova Solutions caught your attention and what are you most excited to contribute to our team?
+07:12:47
+AGENT
+I think you based on the shoe because you were going to complete your sentence and you should stop that. And what are you most your questioning me about something? I understand your first part and I
+07:14:07
+CANDIDATE
+I understand you were mentioning something about how I finish my sentences, and I appreciate you pointing that out; it's good to be clear. Could you elaborate a bit more on what you meant by that and how you perceive the importance of clear communication in a professional setting like this?
+07:15:00
+AGENT
+I think when USB you speak the Earth centers and then some money for This convention zone. two words that the person is become because in the professional environment asking for that, repeating repetition is
+07:15:56
+
+----------------------------------------------------------------------------------------------------------------------------------------
+
+← All interviews  |  New interview
 Interview d2ec63d3...
 completed Phase: TECHNICAL Turns: 5 Started: 2026-03-03 10:13
 Hello! Welcome to your interview. Could you please start by introducing yourself?

@@ -29,7 +29,7 @@ from src.agent.prompt_builder import build_prompt, estimate_prompt_tokens
 from src.agent.llm_provider import get_llm_provider
 from src.agent.validator import validate_output, get_fallback_response
 from src.agent.models import AgentOutput
-from src.agent.summary_generator import generate_summary, should_update_summary
+from src.agent.summary_generator import should_update_summary
 from src.agent.phases import should_advance_phase, get_next_phase, should_end_interview
 from src.agent.evaluator import generate_evaluation
 from src.agent.safeguards import check_interview_safeguards, truncate_candidate_message, get_graceful_closing_message
@@ -42,6 +42,19 @@ from src.exceptions import (
 )
 
 logger_struct = structlog.get_logger()
+
+
+def _build_combined_prompt(interview_prompt: str, current_summary: str) -> str:
+    """Append a summary-update request to the interview prompt for a combined JSON response."""
+    return (
+        f"{interview_prompt}\n\n"
+        "---\n"
+        "Additionally, update the running conversation summary.\n\n"
+        f"Current summary: {current_summary or '(none)'}\n\n"
+        "Respond ONLY with valid JSON (no markdown fences):\n"
+        '{"response": "<your interview question or statement>", '
+        '"summary": "<updated running summary max 500 chars>"}'
+    )
 
 
 async def process_candidate_message(
@@ -134,6 +147,11 @@ async def process_candidate_message(
                 is_fallback=True
             )
 
+        # Pre-compute for stage 3 branching and stage 5 state updates
+        new_turn_count = context.turn_count + 1
+        needs_summary = should_update_summary(new_turn_count)
+        new_summary = context.conversation_summary
+
         # ===== STAGE 2: BUILD PROMPT (OPTIMIZED to 1200-1500 tokens) =====
         stage2_start = time.perf_counter()
         logger_struct.info("stage2_building_prompt", phase=context.phase)
@@ -141,16 +159,28 @@ async def process_candidate_message(
         stage2_latency = (time.perf_counter() - stage2_start) * 1000
         logger_struct.debug("stage2_complete", latency_ms=round(stage2_latency, 2))
 
-        # ===== STAGE 3: CALL LLM (OPTIMIZED with new SDK + tenacity) =====
+        # ===== STAGE 3: CALL LLM =====
+        # On summary turns: one JSON call returns both response + updated summary.
+        # On regular turns: one plain call returns response only.
         stage3_start = time.perf_counter()
-        logger_struct.info("stage3_calling_llm", provider=Config.LLM_PROVIDER)
+        logger_struct.info("stage3_calling_llm", provider=Config.LLM_PROVIDER, combined=needs_summary)
         llm = get_llm_provider()
 
         try:
-            response_text = await llm.generate(prompt)
+            if needs_summary:
+                combined_prompt = _build_combined_prompt(prompt, context.conversation_summary)
+                combined = await llm.generate_combined(combined_prompt)
+                response_text = combined.get("response", "").strip()
+                if not response_text:
+                    raise LLMException("Combined call returned empty response field")
+                _summary = combined.get("summary")
+                if _summary:
+                    new_summary = _summary[:500]
+            else:
+                response_text = await llm.generate(prompt)
             is_fallback = False
             stage3_latency = (time.perf_counter() - stage3_start) * 1000
-            logger_struct.info("stage3_complete", latency_ms=round(stage3_latency, 2), is_fallback=False)
+            logger_struct.info("stage3_complete", latency_ms=round(stage3_latency, 2), is_fallback=False, combined=needs_summary)
 
         except LLMException as e:
             stage3_latency = (time.perf_counter() - stage3_start) * 1000
@@ -179,8 +209,6 @@ async def process_candidate_message(
         # ===== STAGE 5: SAVE & SEND =====
         logger.info(f"[STAGE 5] Saving response and updating state")
 
-        new_turn_count = context.turn_count + 1
-
         # Save agent response to transcripts
         await db.transcripts.insert_one({
             "interview_id": context.interview_id,
@@ -196,16 +224,6 @@ async def process_candidate_message(
                 "estimated_tokens": estimated_tokens
             }
         })
-
-        # Update summary every 5 turns
-        new_summary = context.conversation_summary
-        if should_update_summary(new_turn_count):
-            logger.info(f"Updating conversation summary (turn {new_turn_count})")
-            all_messages = await db.transcripts.find(
-                {"interview_id": context.interview_id}
-            ).sort("timestamp", 1).to_list(length=None)
-
-            new_summary = await generate_summary(all_messages, context.conversation_summary)
 
         # Check phase transitions
         interview = await db.interviews.find_one({"interview_id": context.interview_id})
