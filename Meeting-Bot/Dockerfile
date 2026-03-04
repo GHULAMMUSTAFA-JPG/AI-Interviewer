@@ -59,11 +59,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     \
     # Build tools
-    build-essential \
     wget \
     curl \
-    git \
-    vim \
     \
     # Certificate management
     apt-transport-https \
@@ -220,9 +217,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # ALSA utilities (fallback audio)
     alsa-utils \
     \
-    # Audio processing
-    ffmpeg \
-    \
     # Cleanup
     && rm -rf /var/lib/apt/lists/*
 
@@ -292,8 +286,10 @@ RUN python3.11 -m venv /app/venv && \
 COPY requirements.txt .
 RUN /app/venv/bin/pip install -r requirements.txt --no-cache-dir
 
-# Install Playwright browsers (Chromium)
-RUN /app/venv/bin/playwright install --with-deps chromium
+# Install only Playwright's OS-level dependencies — no browser download.
+# The bot uses channel="chrome" (system Google Chrome), so Playwright's
+# own Chromium is never used and should not be downloaded.
+RUN /app/venv/bin/playwright install-deps chromium
 
 # ════════════════════════════════════════════════════════════════════════════════
 # Directory Setup

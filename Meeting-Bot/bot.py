@@ -343,23 +343,86 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
             # timer. When the timer actually fires (real silence), flush the
             # entire accumulated turn as ONE DB insert.
             # ─────────────────────────────────────────────────────────────
-            UTTERANCE_SILENCE_SEC = 2.0
+            UTTERANCE_SILENCE_SEC = 2.0   # wait for long/mid responses
+            SHORT_UTTERANCE_SEC   = 0.5   # wait for short responses (≤ 8 words)
+            SHORT_UTTERANCE_WORDS = 8
 
             # { speaker_name: {"parts": [str], "timer": asyncio.Task | None} }
             _utterance_buffers: dict = {}
 
+            def _is_echo(text: str, agent_texts: list) -> bool:
+                """
+                Return True if text is likely the bot's TTS audio being echoed back
+                through the meeting captions.
+
+                Two checks:
+                  1. Substring: candidate text appears verbatim inside a recent agent
+                     message (after normalisation) → near-certain echo.
+                  2. Word-overlap: ≥ 65 % of candidate words are in a recent agent
+                     message — only applied when candidate text is ≥ 8 words to
+                     avoid false positives on short genuine answers.
+                """
+                if not text or not agent_texts:
+                    return False
+                norm = " ".join(text.lower().split())
+                words = norm.split()
+                for agent_text in agent_texts:
+                    agent_norm = " ".join(agent_text.lower().split())
+                    # Substring match (strong signal)
+                    if norm in agent_norm:
+                        return True
+                    # Word-overlap (only for longer candidate speech)
+                    if len(words) >= 8:
+                        agent_words = set(agent_norm.split())
+                        overlap = len(set(words) & agent_words) / len(words)
+                        if overlap >= 0.65:
+                            return True
+                return False
+
             async def _flush_speaker(speaker: str, buf: dict) -> None:
-                """Wait for silence, then write the full utterance to DB."""
+                """
+                Wait for silence, then write the full utterance to DB.
+
+                Wait duration is adaptive:
+                  - Short responses (≤ SHORT_UTTERANCE_WORDS words): SHORT_UTTERANCE_SEC
+                  - Longer responses: UTTERANCE_SILENCE_SEC
+                If more text arrives during the wait the timer is cancelled and
+                restarted, so the candidate can always extend a short answer.
+                """
                 try:
-                    await asyncio.sleep(UTTERANCE_SILENCE_SEC)
+                    current = " ".join(buf["parts"]).strip()
+                    wait = (SHORT_UTTERANCE_SEC
+                            if len(current.split()) <= SHORT_UTTERANCE_WORDS
+                            else UTTERANCE_SILENCE_SEC)
+                    await asyncio.sleep(wait)
+
                     full_text = " ".join(buf["parts"]).strip()
                     buf["parts"] = []
                     buf["timer"] = None
-                    if full_text and mongo_connected:
-                        await insert_transcript(interview_id, "candidate", full_text)
-                        preview = full_text[:80] + ("..." if len(full_text) > 80 else "")
-                        msg = f"Saved turn [{speaker}]: {preview}"
-                        print(msg); await push_log(msg)
+                    if not full_text or not mongo_connected:
+                        return
+
+                    # ── Echo filter ───────────────────────────────────────────
+                    # Check whether this text is the bot's own TTS audio being
+                    # misattributed by Google Meet to the candidate speaker.
+                    try:
+                        db = mongo_handler.get_db()
+                        if db is not None:
+                            recent = await db.transcripts.find(
+                                {"interview_id": interview_id, "speaker": "agent"},
+                            ).sort("timestamp", -1).limit(5).to_list(5)
+                            agent_texts = [r.get("text", "") for r in recent]
+                            if _is_echo(full_text, agent_texts):
+                                msg = f"Echo filter: skipped [{speaker}]: {full_text[:80]!r}"
+                                print(msg); await push_log(msg)
+                                return
+                    except Exception as echo_err:
+                        print(f"Echo filter error (non-fatal): {echo_err}")
+
+                    await insert_transcript(interview_id, "candidate", full_text)
+                    preview = full_text[:80] + ("..." if len(full_text) > 80 else "")
+                    msg = f"Saved turn [{speaker}]: {preview}"
+                    print(msg); await push_log(msg)
                 except asyncio.CancelledError:
                     pass  # New caption arrived — timer was reset, not an error
 
@@ -375,8 +438,11 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                         return
 
                     # Skip very short captures that are likely background noise
-                    # (single words, punctuation bursts, ambient sound artefacts).
-                    if len(text) < 10 and len(text.split()) < 3:
+                    # (single punctuation bursts, ambient sound artefacts).
+                    # Allow single-word genuine answers like "yes", "understood",
+                    # "okay", "sure" — these are legitimate candidate responses.
+                    # Only skip if it's a single character or pure punctuation/digits.
+                    if len(text) <= 2 or (len(text.split()) == 1 and not text[0].isalpha()):
                         msg = f"Noise filter: skipped [{speaker}]: {text!r}"
                         print(msg); await push_log(msg)
                         return
