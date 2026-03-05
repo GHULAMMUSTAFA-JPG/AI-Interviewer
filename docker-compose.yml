@@ -70,7 +70,7 @@ services:
   interview-agent:
     build:
       context: ./Main-Agent
-      dockerfile: Dockerfile
+      dockerfile: ../docker/main-agent.Dockerfile
     container_name: interview-agent
     depends_on:
       mongo-init:
@@ -100,7 +100,7 @@ services:
   tts:
     build:
       context: ./TTS
-      dockerfile: Dockerfile
+      dockerfile: ../docker/tts.Dockerfile
     container_name: tts
     depends_on:
       mongo-init:
@@ -132,7 +132,7 @@ services:
   meeting-bot:
     build:
       context: ./Meeting-Bot
-      dockerfile: Dockerfile
+      dockerfile: ../docker/meeting-bot.Dockerfile
     container_name: meeting-bot
     depends_on:
       mongo-init:
@@ -163,7 +163,7 @@ services:
   ui:
     build:
       context: ./UI
-      dockerfile: Dockerfile
+      dockerfile: ../docker/ui.Dockerfile
     container_name: ui
     depends_on:
       mongo-init:

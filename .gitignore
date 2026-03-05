@@ -1,0 +1,77 @@
+# ── Python ────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.Python
+.python-version
+
+# ── Virtual environments ──────────────────────────────────────────
+.venv/
+venv/
+ENV/
+env/
+.eggs/
+
+# ── Environment & secrets ─────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Logs ──────────────────────────────────────────────────────────
+*.log
+*.log.*
+
+# ── Testing & coverage ────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+
+# ── IDE ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Database ──────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Large model files ─────────────────────────────────────────────
+TTS/models/piper/*.onnx
+TTS/models/piper/*.onnx.json
+
+# ── Temporary / scratch ───────────────────────────────────────────
+*.tmp
+*.txt
+!**/requirements.txt
+
+# ── Markdown (keep only core project docs) ────────────────────────
+*.md
+!CLAUDE.md
+!**/CLAUDE.md
+!README.md
+!**/README.md
+
+# ── Session continuation files ────────────────────────────────────
+2026-*-this-session-*.txt
+
+# ── Project-specific ──────────────────────────────────────────────
+.mds/
+history/
+optimization/
+sessions/

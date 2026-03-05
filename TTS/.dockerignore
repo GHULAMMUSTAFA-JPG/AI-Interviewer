@@ -1,0 +1,38 @@
+# Virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Secrets — never bake into image
+.env
+.env.local
+
+# Logs
+*.log
+
+# Git
+.git/
+.gitignore
+
+# Dev tooling
+.vscode/
+.idea/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Tests & fixtures (not needed at runtime)
+tests/
+
+# Documentation & planning artefacts
+docs/
+*.md
+
+# OS
+.DS_Store
+Thumbs.db
