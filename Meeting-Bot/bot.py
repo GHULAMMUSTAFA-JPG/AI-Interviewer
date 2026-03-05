@@ -557,15 +557,20 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                         except Exception as ue:
                             print(f"Unknown echo check error (non-fatal): {ue}")
 
-                    # ── Interruption signal ───────────────────────────────────
-                    # If the bot is currently speaking (TTS is playing audio),
-                    # tell TTS to stop immediately by setting tts_interrupt=True.
+                    # ── Interruption signal + Echo gate ──────────────────────
+                    # Single DB read serves two purposes:
+                    #   1. Send tts_interrupt=True if bot is currently speaking.
+                    #   2. Echo gate: if bot was speaking when THIS chunk arrived,
+                    #      the audio is almost certainly TTS echo — discard it
+                    #      immediately rather than waiting for flush-time check.
+                    #
                     # Fires on the FIRST caption chunk from this utterance only.
-                    # Also checks _speech_start_interrupt_sent to avoid a double
-                    # send if _on_speech_start already fired for this utterance.
+                    # Subsequent chunks (already_sent=True) arrive after the
+                    # interrupt fired and bot stopped — those are real speech.
                     buf_peek = _utterance_buffers.get(speaker, {})
                     already_sent = (buf_peek.get("interrupt_sent")
                                     or speaker in _speech_start_interrupt_sent)
+                    bot_speaking_now = False
                     if not already_sent:
                         try:
                             db = mongo_handler.get_db()
@@ -574,19 +579,29 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                                     {"interview_id": interview_id},
                                     projection={"bot_speaking": 1},
                                 )
-                                if interview_doc and interview_doc.get("bot_speaking"):
-                                    await db.interviews.update_one(
-                                        {"interview_id": interview_id},
-                                        {"$set": {"tts_interrupt": True}},
-                                    )
-                                    msg = f"Interrupt signal sent (on_caption) — bot was speaking, candidate started"
-                                    print(msg); await push_log(msg)
-                                    # Mark both dedup guards so neither path re-sends
-                                    _speech_start_interrupt_sent.add(speaker)
-                                    if speaker in _utterance_buffers:
-                                        _utterance_buffers[speaker]["interrupt_sent"] = True
+                                if interview_doc:
+                                    bot_speaking_now = interview_doc.get("bot_speaking", False)
+                                    if bot_speaking_now:
+                                        await db.interviews.update_one(
+                                            {"interview_id": interview_id},
+                                            {"$set": {"tts_interrupt": True}},
+                                        )
+                                        msg = f"Interrupt signal sent (on_caption) — bot was speaking, candidate started"
+                                        print(msg); await push_log(msg)
+                                        # Mark both dedup guards so neither path re-sends
+                                        _speech_start_interrupt_sent.add(speaker)
+                                        if speaker in _utterance_buffers:
+                                            _utterance_buffers[speaker]["interrupt_sent"] = True
                         except Exception as interrupt_err:
                             print(f"Interrupt signal error (non-fatal): {interrupt_err}")
+
+                    # Echo gate: caption arrived while bot was speaking → TTS echo, discard.
+                    # bot_speaking_now is only set on first-chunk DB check; subsequent
+                    # chunks of the same utterance (already_sent=True) are real speech.
+                    if bot_speaking_now:
+                        msg = f"Echo gate: discarded [{speaker}] (bot was speaking): {text[:80]!r}"
+                        print(msg); await push_log(msg)
+                        return
 
                     # Initialise buffer slot for first caption from this speaker
                     if speaker not in _utterance_buffers:
