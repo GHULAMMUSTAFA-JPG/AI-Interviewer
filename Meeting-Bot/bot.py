@@ -383,31 +383,34 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                 Return True if text is likely the bot's TTS audio being echoed back
                 through the meeting captions.
 
+                Google Meet STT changes punctuation between the original TTS text and
+                the echo (e.g. "interviewer!" → "interviewer.", "challenges" →
+                "challenges?"). Strip punctuation before comparison so token matching
+                is not broken by punctuation differences.
+
                 Two checks:
                   1. Substring: candidate text appears verbatim inside a recent agent
-                     message (after normalisation) → near-certain echo.
-                  2. Word-overlap: ≥ 65 % of candidate words are in a recent agent
-                     message — only applied when candidate text is ≥ 8 words to
-                     avoid false positives on short genuine answers.
+                     message → near-certain echo.
+                  2. Word-overlap: ≥ 80% of candidate words match a recent agent
+                     message, for utterances ≥ 8 words.
                 """
                 if not text or not agent_texts:
                     return False
-                norm = " ".join(text.lower().split())
+
+                def _strip(s: str) -> str:
+                    # Remove all punctuation, lowercase, collapse whitespace.
+                    return " ".join(re.sub(r'[^\w\s]', '', s.lower()).split())
+
+                norm  = _strip(text)
                 words = norm.split()
                 for agent_text in agent_texts:
-                    agent_norm = " ".join(agent_text.lower().split())
-                    # Substring match (strong signal)
+                    agent_norm = _strip(agent_text)
                     if norm in agent_norm:
                         return True
-                    # Word-overlap (only for longer candidate speech).
-                    # Threshold is 85% (not 65%) — when the agent asks about
-                    # topic X, the candidate naturally uses those same words.
-                    # A genuine answer about "AI agents, software development"
-                    # would hit 65%+ easily; real TTS echo is typically 90%+.
                     if len(words) >= 8:
                         agent_words = set(agent_norm.split())
                         overlap = len(set(words) & agent_words) / len(words)
-                        if overlap >= 0.85:
+                        if overlap >= 0.80:
                             return True
                 return False
 
@@ -536,13 +539,17 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                         print(msg); await push_log(msg)
                         return
 
-                    # ── Unknown speaker: early echo check (Option A) ──────────
-                    # When Google Meet hasn't attributed audio to a named speaker
-                    # yet, the caption arrives as "Unknown". This is the most
-                    # common path for bot TTS audio slipping through the "(AI)"
-                    # filter. Run the echo check NOW before buffering, so we
-                    # discard it immediately rather than waiting for flush.
-                    if speaker == "Unknown":
+                    # ── Early echo check (all speakers, first chunk only) ─────
+                    # Run BEFORE buffering on the first chunk of each new utterance.
+                    # Catches two cases:
+                    #   - Unknown speaker: TTS audio misattributed before Meet
+                    #     assigns a name.
+                    #   - Named speaker: echo arrives 2-4s AFTER bot stops speaking
+                    #     (Google Meet STT has a processing delay), so bot_speaking
+                    #     is already False and the echo gate below won't fire.
+                    # One DB query per utterance start — not per chunk.
+                    _buf_for_early = _utterance_buffers.get(speaker, {})
+                    if not _buf_for_early.get("parts"):
                         try:
                             db = mongo_handler.get_db()
                             if db is not None:
@@ -551,11 +558,11 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                                 ).sort("timestamp", -1).limit(10).to_list(10)
                                 agent_texts = [r.get("text", "") for r in recent]
                                 if _is_echo(text, agent_texts):
-                                    msg = f"Echo filter (Unknown): discarded: {text[:80]!r}"
+                                    msg = f"Echo filter (early): discarded [{speaker}]: {text[:80]!r}"
                                     print(msg); await push_log(msg)
                                     return
                         except Exception as ue:
-                            print(f"Unknown echo check error (non-fatal): {ue}")
+                            print(f"Early echo check error (non-fatal): {ue}")
 
                     # ── Interruption signal + Echo gate ──────────────────────
                     # Single DB read serves two purposes:
