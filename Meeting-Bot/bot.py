@@ -343,8 +343,8 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
             # timer. When the timer actually fires (real silence), flush the
             # entire accumulated turn as ONE DB insert.
             # ─────────────────────────────────────────────────────────────
-            UTTERANCE_SILENCE_SEC = 2.0   # wait for long/mid responses
-            SHORT_UTTERANCE_SEC   = 1.0   # wait for short responses (≤ 8 words)
+            UTTERANCE_SILENCE_SEC = 1.2   # wait for long/mid responses (was 2.0)
+            SHORT_UTTERANCE_SEC   = 0.7   # wait for short responses ≤ 8 words (was 1.0)
             SHORT_UTTERANCE_WORDS = 8     # 1.0 s > DOM chunk interval (~0.3-0.5 s)
                                           # so rapid chunks still accumulate before flush
             MAX_UTTERANCE_SEC     = 30.0  # force-flush after 30 s even if candidate
