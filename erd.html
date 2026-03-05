@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>AI Interviewer — ERD</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <style>
+    body { background: #0d1117; color: #e6edf3; font-family: sans-serif; padding: 2rem; }
+    h1   { color: #58a6ff; margin-bottom: 1.5rem; }
+    .mermaid { background: #161b22; border-radius: 12px; padding: 2rem; }
+  </style>
+</head>
+<body>
+  <h1>AI Interviewer — MongoDB ERD</h1>
+  <div class="mermaid">
+erDiagram
+
+    INTERVIEWS {
+        ObjectId    _id                     PK
+        string      interview_id            UK
+        string      status                  "in_progress | completed | abandoned"
+        string      phase                   "INTRO | EXPERIENCE | TECHNICAL | BEHAVIORAL | CLOSING"
+        int         turn_count
+        int         phase_turn_count
+        string      job_description
+        string      company_info
+        string      candidate_cv
+        string      candidate_name
+        string      meeting_url
+        datetime    started_at
+        datetime    updated_at
+        datetime    ended_at
+        string      conversation_summary    "max 500 chars"
+        string      bot_status              "admitted"
+        bool        bot_speaking
+        bool        tts_interrupt
+        object      evaluation              "embedded at end of interview"
+        object      limits                  "forced_end_reason"
+    }
+
+    TRANSCRIPTS {
+        ObjectId    _id                     PK
+        string      interview_id            FK
+        string      speaker                 "candidate | agent"
+        string      text
+        datetime    timestamp
+        string      audio_url               "null then GridFS ObjectId"
+        object      metadata                "agent messages only"
+    }
+
+    TRANSCRIPT_METADATA {
+        string      phase
+        int         turn_count
+        bool        is_fallback
+        string      llm_provider            "gemini | openai | anthropic"
+        int         estimated_tokens
+        bool        forced_end
+        string      reason
+    }
+
+    EVALUATION {
+        string      recommendation          "hire | no_hire | maybe"
+        int         score                   "0-100"
+        array       strengths
+        array       weaknesses
+        string      summary
+    }
+
+    AGENT_STATE {
+        string      _id                     PK "fixed: resume_token"
+        object      token                   "change stream resume token"
+    }
+
+    FS_FILES {
+        ObjectId    _id                     PK
+        string      filename
+        int         length
+        datetime    uploadDate
+        string      contentType
+    }
+
+    FS_CHUNKS {
+        ObjectId    _id                     PK
+        ObjectId    files_id                FK
+        int         n                       "chunk sequence"
+        binary      data                    "255 KB max"
+    }
+
+    INTERVIEWS           ||--o{ TRANSCRIPTS          : "interview_id"
+    TRANSCRIPTS          ||--o| TRANSCRIPT_METADATA   : "metadata embedded"
+    INTERVIEWS           ||--o| EVALUATION            : "evaluation embedded"
+    TRANSCRIPTS          ||--o| FS_FILES              : "audio_url to _id"
+    FS_FILES             ||--|{ FS_CHUNKS             : "files_id"
+  </div>
+
+  <script>
+    mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+  </script>
+</body>
+</html>
