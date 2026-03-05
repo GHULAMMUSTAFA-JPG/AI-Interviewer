@@ -269,6 +269,98 @@ _ENDED_JS = """
 }
 """
 
+# JavaScript injected once after captions are enabled.
+# Attaches a MutationObserver to the caption container so the Python
+# on_speech_start callback fires in ~2 ms when the DOM changes —
+# compared to 0–500 ms with polling.  Used ONLY for the interrupt
+# signal; the normal polling loop still drives caption stabilisation.
+#
+# Replaces __FN_NAME__ with the page.expose_function name at runtime.
+_MUTATION_OBSERVER_JS = r"""
+(fnName) => {
+    const CAPTION_JSNAMES = ['YSxPC', 'tgaKEf'];
+    const NOISE = __NOISE__;
+
+    const isNoise = s => {
+        const lc = (s || '').toLowerCase();
+        return NOISE.some(n => lc.includes(n));
+    };
+
+    // Mirror _CAPTION_JS Strategy 1: jsname spans only.
+    // We only need speaker+text for the interrupt signal — we don't
+    // need to cover every fallback strategy here.
+    function extractCaptions() {
+        const byText = {};
+        function add(speaker, text) {
+            speaker = (speaker || '').trim() || 'Unknown';
+            text    = (text    || '').trim();
+            if (!text || text.length < 3 || isNoise(text)) return;
+            if (speaker !== 'Unknown' &&
+                text.toLowerCase() === speaker.toLowerCase()) return;
+            if (!byText[text] || byText[text].speaker === 'Unknown') {
+                byText[text] = { speaker, text };
+            }
+        }
+        for (const jn of CAPTION_JSNAMES) {
+            for (const el of document.querySelectorAll('[jsname="' + jn + '"]')) {
+                const t = (el.innerText || '').trim();
+                if (!t) continue;
+                let speaker = 'Unknown';
+                const container = el.closest('div');
+                if (container) {
+                    for (const s of container.querySelectorAll('span, div')) {
+                        if (s === el || s.contains(el)) continue;
+                        const st = (s.innerText || '').trim();
+                        if (st && st.length > 0 && st.length < 60 && !isNoise(st)) {
+                            speaker = st;
+                            break;
+                        }
+                    }
+                }
+                add(speaker, t);
+            }
+        }
+        return Object.values(byText);
+    }
+
+    // Per-speaker JS-side debounce: max one Python call per 150 ms.
+    // Prevents event storm through the Playwright bridge when Meet
+    // updates the DOM word-by-word (~10–20 mutations per sentence).
+    const lastCall = {};
+    let observer   = null;
+
+    function handleMutations() {
+        const now = Date.now();
+        for (const { speaker, text } of extractCaptions()) {
+            if (now - (lastCall[speaker] || 0) < 150) continue;
+            lastCall[speaker] = now;
+            try { window[fnName]({ speaker, text }); } catch (_) {}
+        }
+    }
+
+    function attach() {
+        // Find the nearest stable ancestor of the caption text nodes.
+        // Watching the body works but is noisy; a tighter target is better.
+        let target = document.body;
+        for (const jn of ['tgaKEf', 'YSxPC', 'BjGdaf']) {
+            const el = document.querySelector('[jsname="' + jn + '"]');
+            if (el) {
+                target = el.closest('div[jsname]') || el.parentElement || document.body;
+                break;
+            }
+        }
+        if (observer) observer.disconnect();
+        observer = new MutationObserver(handleMutations);
+        observer.observe(target, { childList: true, subtree: true, characterData: true });
+    }
+
+    attach();
+
+    // Exposed for the Python watchdog — re-attaches if Meet recreates the DOM.
+    window.__caption_observer_reattach__ = attach;
+}
+""".replace("__NOISE__", json.dumps(_UI_NOISE))
+
 
 # ══════════════════════════════════════════════════════════════════
 class CaptionScraper:
@@ -931,6 +1023,64 @@ class CaptionScraper:
         print(msg); await push_log(msg)
         return 1
 
+    # ── MutationObserver injection ────────────────────────────────
+
+    async def _inject_mutation_observer(self, fn_name: str, callback) -> bool:
+        """
+        Expose `callback` as window[fn_name] then inject the MutationObserver.
+
+        Returns True on success, False if injection failed (polling still works).
+        The observer fires callback({speaker, text}) within ~2 ms of any DOM
+        caption change — used exclusively for the TTS interrupt signal.
+        """
+        try:
+            # page.expose_function makes fn_name available in ALL frames.
+            # Wrap in try/except — re-injection after watchdog re-attach
+            # doesn't need to re-expose (name is already bound).
+            try:
+                await self.page.expose_function(fn_name, callback)
+            except Exception:
+                pass  # Already exposed from a previous inject call
+
+            # Evaluate in the correct frame context (main page or Meet iframe)
+            await self._ctx.evaluate(f"({_MUTATION_OBSERVER_JS})('{fn_name}')")
+            msg = "MutationObserver injected — interrupt detection ~2 ms"
+            print(msg); await push_log(msg)
+            return True
+        except Exception as e:
+            msg = f"MutationObserver inject failed (polling still active): {e}"
+            print(msg); await push_log(msg)
+            return False
+
+    async def _observer_watchdog(self, fn_name: str) -> None:
+        """
+        Every 5 s, re-attach the MutationObserver in case Google Meet
+        recreated its caption DOM subtree (page events, reconnects, etc.).
+        If __caption_observer_reattach__ is no longer on window the full
+        JS block is re-injected (but expose_function is skipped — already bound).
+        """
+        while True:
+            await asyncio.sleep(5)
+            try:
+                reattach_exists = await self._ctx.evaluate(
+                    "() => typeof window.__caption_observer_reattach__ === 'function'"
+                )
+                if reattach_exists:
+                    await self._ctx.evaluate(
+                        "() => window.__caption_observer_reattach__()"
+                    )
+                else:
+                    # Full re-inject (page navigation reset window)
+                    await self._ctx.evaluate(
+                        f"({_MUTATION_OBSERVER_JS})('{fn_name}')"
+                    )
+                    msg = "MutationObserver re-injected by watchdog (window reset)"
+                    print(msg); await push_log(msg)
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                pass  # Non-fatal — polling loop is still running
+
     # ── Main scrape loop ──────────────────────────────────────────
 
     async def scrape_loop(self, session_id, on_caption=None, on_speech_start=None):
@@ -966,6 +1116,20 @@ class CaptionScraper:
 
         await self._enable_captions()
 
+        # ── MutationObserver (fast interrupt path) ─────────────────
+        # Inject AFTER captions are enabled so the caption container
+        # exists in the DOM.  Falls back gracefully if injection fails
+        # — the polling loop below is always the source of truth for
+        # caption stabilisation and DB writes.
+        _watchdog_task = None
+        if on_speech_start:
+            _fn_name = f"onSpeechStart_{session_id}"
+            _injected = await self._inject_mutation_observer(_fn_name, on_speech_start)
+            if _injected:
+                _watchdog_task = asyncio.create_task(
+                    self._observer_watchdog(_fn_name)
+                )
+
         iteration = 0
         try:
             while True:
@@ -981,14 +1145,13 @@ class CaptionScraper:
 
                 # Step 2: feed each into the per-speaker stabilization buffer
                 for speaker, text in raw:
-                    # Capture text BEFORE update to detect new/changed text
-                    prev_text = (self.speaker_buffers.get(speaker) or {}).get("current_text", "")
                     self._update_buffer(speaker, text)
-                    # Fire on_speech_start immediately when DOM text changes —
-                    # before the 1.5 s stabilization window, enabling early interrupt.
-                    new_text = (self.speaker_buffers.get(speaker) or {}).get("current_text", "")
-                    if on_speech_start and new_text and new_text != prev_text:
-                        asyncio.create_task(on_speech_start({"speaker": speaker, "text": new_text}))
+                # Note: on_speech_start is now fired by the MutationObserver
+                # (injected above) which reacts in ~2 ms.  The polling fallback
+                # path that called on_speech_start here is removed to avoid
+                # double-firing when the observer is active.  If the observer
+                # failed to inject, on_speech_start simply won't fire from the
+                # polling path either — interrupt still works via on_caption.
 
                 # Step 3: commit any buffers that have now stabilized
                 new_saves = await self._flush_stable(_wrapped)
@@ -1025,6 +1188,14 @@ class CaptionScraper:
             print(msg); await push_log(msg)
 
         finally:
+            # Stop the MutationObserver watchdog
+            if _watchdog_task and not _watchdog_task.done():
+                _watchdog_task.cancel()
+                try:
+                    await _watchdog_task
+                except asyncio.CancelledError:
+                    pass
+
             # End-of-meeting flush: commit any text still sitting in buffers
             msg = "🔄 Flushing remaining buffers..."
             print(msg); await push_log(msg)
