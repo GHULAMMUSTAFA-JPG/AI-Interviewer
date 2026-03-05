@@ -20,13 +20,20 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-# Configure structlog for production-grade JSON logging
+# Human-readable log format: "HH:MM:SS  LEVEL  event  key=val ..."
+def _plain_renderer(logger, method, event_dict):
+    ts    = event_dict.pop("timestamp", "")
+    level = event_dict.pop("level", method).upper()[:4]
+    event = event_dict.pop("event", "")
+    extras = "  ".join(f"{k}={v}" for k, v in event_dict.items() if v is not None)
+    return f"{ts}  {level:<4}  {event}" + (f"  {extras}" if extras else "")
+
 structlog.configure(
     processors=[
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.JSONRenderer()
+        structlog.processors.TimeStamper(fmt="%H:%M:%S"),
+        _plain_renderer,
     ],
     wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
     context_class=dict,

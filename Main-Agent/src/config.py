@@ -31,7 +31,8 @@ if _log_file:
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s  %(levelname)-4s  %(message)s',
+    datefmt='%H:%M:%S',
     handlers=_log_handlers
 )
 

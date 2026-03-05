@@ -386,26 +386,13 @@ setup_virtual_audio() {
 start_health_monitor() {
     log_info "=== Starting Health Monitor ==="
     
-    # Background loop that checks component health every 30 seconds
+    # Background loop — silent when healthy, logs only on failure
     (
         while true; do
-            sleep 30
-            
-            # Check by process name — immune to fork/daemon PID changes.
-            if ! pgrep -x Xvfb > /dev/null 2>&1; then
-                log_error "Xvfb crashed!"
-            fi
-            if ! pgrep -x x11vnc > /dev/null 2>&1; then
-                log_error "x11vnc crashed!"
-            fi
-            if ! pgrep -f websockify > /dev/null 2>&1; then
-                log_error "websockify crashed!"
-            fi
-
-            XVFB_ST=$(pgrep -x Xvfb > /dev/null 2>&1 && echo 'OK' || echo 'DEAD')
-            VNC_ST=$(pgrep -x x11vnc > /dev/null 2>&1 && echo 'OK' || echo 'DEAD')
-            NOVNC_ST=$(pgrep -f websockify > /dev/null 2>&1 && echo 'OK' || echo 'DEAD')
-            log_info "Health check: Xvfb=$XVFB_ST, VNC=$VNC_ST, noVNC=$NOVNC_ST"
+            sleep 60
+            pgrep -x Xvfb      > /dev/null 2>&1 || log_error "Xvfb crashed!"
+            pgrep -x x11vnc    > /dev/null 2>&1 || log_error "x11vnc crashed!"
+            pgrep -f websockify > /dev/null 2>&1 || log_error "websockify crashed!"
         done
     ) &
     
