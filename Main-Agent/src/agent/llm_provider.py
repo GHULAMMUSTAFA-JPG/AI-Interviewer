@@ -40,6 +40,9 @@ from src.agent.retry import llm_circuit_breaker, summary_circuit_breaker
 
 logger_struct = structlog.get_logger()
 
+# Session-scoped LLM call counter — reset on process restart, never persisted.
+_llm_call_count: int = 0
+
 
 def _parse_retry_delay(exc: Exception) -> float:
     """
@@ -106,10 +109,13 @@ class GeminiProvider(LLMProvider):
 
     async def _call_gemini(self, prompt: str) -> str:
         """Core Gemini API call — no retry, no circuit breaker."""
-        start_time = time.perf_counter()
-        try:
-            logger_struct.debug("gemini_request_starting", model=self.model)
+        global _llm_call_count
+        _llm_call_count += 1
+        call_num = _llm_call_count
 
+        start_time = time.perf_counter()
+        logger_struct.info("llm_call", call_num=call_num, model=self.model)
+        try:
             response = await self.client.aio.models.generate_content(
                 model=self.model,
                 contents=prompt,
@@ -125,7 +131,8 @@ class GeminiProvider(LLMProvider):
 
             latency_ms = (time.perf_counter() - start_time) * 1000
             logger_struct.info(
-                "gemini_response_generated",
+                "llm_call_success",
+                call_num=call_num,
                 latency_ms=round(latency_ms, 2),
                 response_length=len(response.text),
                 model=self.model
@@ -134,13 +141,24 @@ class GeminiProvider(LLMProvider):
 
         except Exception as e:
             latency_ms = (time.perf_counter() - start_time) * 1000
-            logger_struct.error(
-                "gemini_generation_failed",
-                error=str(e),
-                error_type=type(e).__name__,
-                latency_ms=round(latency_ms, 2),
-                exc_info=True
-            )
+            is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)
+            if is_rate_limit:
+                logger_struct.error(
+                    "RATE_LIMITED",
+                    call_num=call_num,
+                    model=self.model,
+                    session_calls=call_num,
+                    hint="quota exhausted — switch API key or wait for daily reset"
+                )
+            else:
+                logger_struct.error(
+                    "llm_call_failed",
+                    call_num=call_num,
+                    error=str(e)[:120],
+                    error_type=type(e).__name__,
+                    latency_ms=round(latency_ms, 2),
+                    exc_info=True
+                )
             raise LLMException(f"Gemini error: {e}")
 
     @retry(

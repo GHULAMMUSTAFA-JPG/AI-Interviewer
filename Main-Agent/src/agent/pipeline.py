@@ -317,11 +317,6 @@ async def process_candidate_message(
             response_preview=response_text[:50]
         )
 
-        # Check if we met performance target
-        if total_latency_ms < 500:
-            logger_struct.info("performance_target_met", latency_ms=round(total_latency_ms, 2))
-        else:
-            logger_struct.warning("performance_target_missed", latency_ms=round(total_latency_ms, 2), target_ms=500)
 
         return output
 

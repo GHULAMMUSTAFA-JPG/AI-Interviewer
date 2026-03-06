@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import signal
+from datetime import datetime, timezone
 
 from motor.motor_asyncio import AsyncIOMotorClient
 
@@ -113,6 +114,12 @@ class TTSService:
 
             if self._interrupt_handler.stop_event.is_set():
                 logger.info(f"Transcript interrupted by candidate: {doc.id}")
+                # Schedule a resume check — if the candidate's word was too brief
+                # to trigger a full agent response, re-play the interrupted text
+                # so the conversation doesn't deadlock.
+                asyncio.create_task(
+                    self._maybe_resume(doc.interview_id, doc.text)
+                )
 
         except Exception as exc:
             logger.error(f"Transcript processing failed: {doc.id} — {exc}")
@@ -124,6 +131,56 @@ class TTSService:
         finally:
             # Disarm: mark bot as no longer speaking, cancel change stream watcher
             await self._interrupt_handler.disarm(doc.interview_id)
+
+    async def _maybe_resume(self, interview_id: str, text: str) -> None:
+        """
+        After a TTS interrupt, wait 12s for the candidate to say something
+        meaningful. If no new agent transcript appears (meaning the pipeline
+        never fired), re-insert the interrupted text so TTS plays it again.
+        Prevents the conversation deadlocking when a false/brief interrupt
+        fires but the candidate had nothing to say.
+        """
+        RESUME_WAIT_SEC = 12.0
+        await asyncio.sleep(RESUME_WAIT_SEC)
+        try:
+            db = self._mongo_client[config.mongodb_db]
+            col = db[config.transcripts_collection]
+
+            interrupted_at = datetime.now(timezone.utc)
+
+            # Check if a new agent transcript was inserted after the interrupt
+            new_agent = await col.find_one({
+                "interview_id": interview_id,
+                "speaker": "agent",
+                "timestamp": {"$gt": interrupted_at},
+            })
+            if new_agent:
+                logger.info(f"Resume check: pipeline responded — skip resume [{interview_id}]")
+                return
+
+            # Don't resume if interview ended
+            interview = await db.interviews.find_one(
+                {"interview_id": interview_id},
+                projection={"status": 1},
+            )
+            if interview and interview.get("status") in ("completed", "abandoned"):
+                return
+
+            # No response and interview still active — re-play interrupted text
+            logger.info(
+                f"Resume: no candidate reply after {RESUME_WAIT_SEC}s "
+                f"— resuming interrupted response [{interview_id}]"
+            )
+            await col.insert_one({
+                "interview_id": interview_id,
+                "speaker": "agent",
+                "text": text,
+                "audio_url": None,
+                "timestamp": datetime.now(timezone.utc),
+                "metadata": {"resumed_after_interrupt": True},
+            })
+        except Exception as exc:
+            logger.error(f"Resume check failed [{interview_id}]: {exc}")
 
     async def stop(self) -> None:
         """Stop TTS service gracefully."""

@@ -11,7 +11,7 @@ Key differences from STT/bot_logic.py:
 import asyncio
 import re
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 
 from caption_scraper import scrape_meeting_captions
@@ -492,6 +492,30 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                                 return
                     except Exception as echo_err:
                         print(f"Echo filter error (non-fatal): {echo_err}")
+
+                    # ── Dedup guard ───────────────────────────────────────────────
+                    # Google Meet re-attributes mid-utterance (Unknown → "Ghulam Ahmed"),
+                    # creating multiple buffer slots that all flush the same text.
+                    # Skip if identical text was already saved in the last 60 seconds.
+                    try:
+                        db_dedup = mongo_handler.get_db()
+                        if db_dedup is not None:
+                            cutoff = datetime.utcnow() - timedelta(seconds=60)
+                            recent_cands = await db_dedup.transcripts.find(
+                                {"interview_id": interview_id, "speaker": "candidate",
+                                 "timestamp": {"$gte": cutoff}}
+                            ).sort("timestamp", -1).limit(5).to_list(5)
+                            def _norm_d(s):
+                                return " ".join(re.sub(r'[^\w\s]', '', s.lower()).split())
+                            n_new = _norm_d(full_text)
+                            for rec in recent_cands:
+                                n_old = _norm_d(rec.get("text", ""))
+                                if n_new and n_old and (n_new == n_old or n_new in n_old or n_old in n_new):
+                                    msg = f"Dedup filter: skipped [{speaker}] (duplicate of recent): {full_text[:60]!r}"
+                                    print(msg); await push_log(msg)
+                                    return
+                    except Exception as dd_err:
+                        print(f"Dedup check error (non-fatal): {dd_err}")
 
                     await insert_transcript(interview_id, "candidate", full_text)
                     preview = full_text[:80] + ("..." if len(full_text) > 80 else "")
