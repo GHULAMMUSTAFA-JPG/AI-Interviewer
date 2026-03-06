@@ -54,7 +54,7 @@ from logger import push_log
 
 # ── Configuration ──────────────────────────────────────────────────
 POLL_INTERVAL          = 0.5   # seconds between DOM polls (was 1.0 — halved for faster interrupt detection)
-STABILIZATION_SEC      = 1.0   # seconds a caption must be unchanged before saving (was 1.5)
+STABILIZATION_SEC      = 0.7   # seconds a caption must be unchanged before saving (was 1.0)
 SILENT_WARN_SEC        = 30    # log a warning after this many silent seconds
 ENABLE_RETRIES         = 5     # caption-toggle attempts
 TRANSCRIPT_DIR         = Path("transcription_recordings")

@@ -144,8 +144,7 @@ async def _watch_new_interviews(db, shutdown_event: asyncio.Event) -> None:
     insert the opening greeting into interviews.transcripts.
 
     We wait for Meeting-Bot to set bot_status='admitted' (after the mic is
-    confirmed unmuted) rather than on the raw insert.  A 5-second delay is
-    added so the candidate has a moment to settle before hearing the greeting.
+    confirmed unmuted) rather than on the raw insert.
 
     We deliberately do NOT gate on participant_joined because DOM-based
     participant detection inside Google Meet is unreliable — selectors change
@@ -160,27 +159,39 @@ async def _watch_new_interviews(db, shutdown_event: asyncio.Event) -> None:
         }
     ]
 
-    async with db.interviews.watch(pipeline, full_document="updateLookup") as stream:
-        async for change in stream:
+    while not shutdown_event.is_set():
+        try:
+            async with db.interviews.watch(pipeline, full_document="updateLookup") as stream:
+                async for change in stream:
+                    if shutdown_event.is_set():
+                        return
+
+                    interview = change.get("fullDocument") or {}
+                    interview_id = str(interview.get("interview_id", interview.get("_id", "unknown")))
+
+                    logger.info(f"[BOT ADMITTED] {interview_id} — inserting greeting")
+                    await asyncio.sleep(1)   # Brief pause so candidate can hear the first word
+
+                    try:
+                        await db.transcripts.insert_one({
+                            "interview_id": interview_id,
+                            "speaker": "agent",
+                            "text": (
+                                "Hello! Welcome to your interview. "
+                                "Could you please start by introducing yourself?"
+                            ),
+                            "audio_url": None,
+                            "timestamp": datetime.utcnow(),
+                        })
+                        logger.info(f"[GREETING SENT] {interview_id}")
+                    except Exception as insert_exc:
+                        logger.error(f"[GREETING] Failed to insert greeting for {interview_id}: {insert_exc}")
+
+        except Exception as exc:
             if shutdown_event.is_set():
-                break
-
-            interview = change.get("fullDocument") or {}
-            interview_id = str(interview.get("interview_id", interview.get("_id", "unknown")))
-
-            logger.info(f"[BOT ADMITTED] {interview_id} — waiting 5s then inserting greeting")
-            await asyncio.sleep(5)   # Give candidate time to settle in the meeting
-
-            await db.transcripts.insert_one({
-                "interview_id": interview_id,
-                "speaker": "agent",
-                "text": (
-                    "Hello! Welcome to your interview. "
-                    "Could you please start by introducing yourself?"
-                ),
-                "audio_url": None,
-                "timestamp": datetime.utcnow(),
-            })
+                return
+            logger.error(f"[GREETING WATCHER] Error — restarting in 2s: {exc}")
+            await asyncio.sleep(2)
 
 
 async def main() -> None:
@@ -216,22 +227,32 @@ async def main() -> None:
             logger.info("Resuming change stream from saved token")
 
         async def _candidate_watcher():
-            try:
-                await _watch(db, pipeline, resume_token, shutdown_event)
-            except Exception as exc:
-                # If the saved token is too old (oplog rotated), clear it and restart
-                if resume_token and (
-                    "InvalidResumeToken" in type(exc).__name__
-                    or "ChangeStreamHistoryLost" in type(exc).__name__
-                    or "resume" in str(exc).lower()
-                ):
-                    logger.warning(
-                        f"Resume token expired — clearing and restarting from current position: {exc}"
-                    )
-                    await db.agent_state.delete_one({"_id": "resume_token"})
-                    await _watch(db, pipeline, None, shutdown_event)
-                else:
-                    raise
+            current_token = resume_token
+            retry_delay = 2
+            while not shutdown_event.is_set():
+                try:
+                    await _watch(db, pipeline, current_token, shutdown_event)
+                    return  # clean shutdown
+                except Exception as exc:
+                    if shutdown_event.is_set():
+                        return
+                    # If the saved token is too old (oplog rotated), clear it
+                    if current_token and (
+                        "InvalidResumeToken" in type(exc).__name__
+                        or "ChangeStreamHistoryLost" in type(exc).__name__
+                        or "resume" in str(exc).lower()
+                    ):
+                        logger.warning(
+                            f"Resume token expired — clearing and restarting: {exc}"
+                        )
+                        await db.agent_state.delete_one({"_id": "resume_token"})
+                        current_token = None
+                    else:
+                        logger.error(
+                            f"[CANDIDATE WATCHER] Error — restarting in {retry_delay}s: {exc}"
+                        )
+                        await asyncio.sleep(retry_delay)
+                        retry_delay = min(retry_delay * 2, 30)
 
         # Run both watchers concurrently
         await asyncio.gather(

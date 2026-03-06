@@ -115,6 +115,20 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
         msg = "Continuing without MongoDB (captions will not be saved)"
         print(msg); await push_log(msg)
 
+    async def _abort(reason: str) -> None:
+        """Mark interview abandoned and log. Called on every early-exit path."""
+        try:
+            _db = mongo_handler.get_db()
+            if _db is not None:
+                await _db.interviews.update_one(
+                    {"interview_id": interview_id, "status": "in_progress"},
+                    {"$set": {"status": "abandoned", "ended_at": datetime.utcnow()}}
+                )
+        except Exception:
+            pass
+        msg2 = f"Interview {interview_id} aborted: {reason}"
+        print(msg2); await push_log(msg2)
+
     async with async_playwright() as p:
         try:
             chrome_args = [
@@ -167,6 +181,7 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
             if not nav_ok:
                 msg = "Navigation failed after 3 attempts — aborting"
                 print(msg); await push_log(msg)
+                await _abort("navigation failed")
                 await ctx.close()
                 return
 
@@ -232,6 +247,7 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
             if not joined:
                 msg = "No join button found"
                 print(msg); await push_log(msg)
+                await _abort("join button not found")
                 await ctx.close()
                 return
 
@@ -249,14 +265,31 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                     if any(x in body for x in ["not found", "has ended", "denied", "can't access"]):
                         msg = "Denied / Meeting ended before join"
                         print(msg); await push_log(msg)
+                        await _abort("denied or meeting ended")
                         await ctx.close()
                         return
+                except Exception:
+                    pass
+                # Check if interview was stopped while waiting in lobby
+                try:
+                    _lobby_db = mongo_handler.get_db()
+                    if _lobby_db is not None:
+                        _lobby_check = await _lobby_db.interviews.find_one(
+                            {"interview_id": interview_id},
+                            projection={"status": 1}
+                        )
+                        if _lobby_check and _lobby_check.get("status") in ("abandoned", "completed"):
+                            msg = f"Interview {interview_id} stopped while in lobby — aborting"
+                            print(msg); await push_log(msg)
+                            await ctx.close()
+                            return
                 except Exception:
                     pass
 
             if not admitted:
                 msg = "Not admitted (10 min timeout)"
                 print(msg); await push_log(msg)
+                await _abort("not admitted within 10 minutes")
                 await ctx.close()
                 return
 
@@ -343,8 +376,8 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
             # timer. When the timer actually fires (real silence), flush the
             # entire accumulated turn as ONE DB insert.
             # ─────────────────────────────────────────────────────────────
-            UTTERANCE_SILENCE_SEC = 1.2   # wait for long/mid responses (was 2.0)
-            SHORT_UTTERANCE_SEC   = 0.7   # wait for short responses ≤ 8 words (was 1.0)
+            UTTERANCE_SILENCE_SEC = 0.8   # wait for long/mid responses (was 1.2)
+            SHORT_UTTERANCE_SEC   = 0.4   # wait for short responses ≤ 8 words (was 0.7)
             SHORT_UTTERANCE_WORDS = 8     # 1.0 s > DOM chunk interval (~0.3-0.5 s)
                                           # so rapid chunks still accumulate before flush
             MAX_UTTERANCE_SEC     = 30.0  # force-flush after 30 s even if candidate
@@ -410,7 +443,7 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                     if len(words) >= 8:
                         agent_words = set(agent_norm.split())
                         overlap = len(set(words) & agent_words) / len(words)
-                        if overlap >= 0.80:
+                        if overlap >= 0.95:  # was 0.80 — raised to avoid filtering legitimate replies
                             return True
                 return False
 
@@ -478,11 +511,61 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                 """
                 try:
                     speaker = event.get("speaker", "Unknown")
+                    text    = event.get("text", "").strip()
                     if "(ai)" in speaker.lower():
                         return
                     # Already sent for this utterance
                     if speaker in _speech_start_interrupt_sent:
                         return
+
+                    # Echo check: the MutationObserver fires ~3 s after TTS starts,
+                    # carrying the TTS audio as caption text (attributed to "Unknown"
+                    # or even the candidate's name by Google Meet).  If the incoming
+                    # text looks like a fragment of recent agent speech, it's an echo
+                    # — do NOT send the interrupt.
+                    if text:
+                        try:
+                            db_echo = mongo_handler.get_db()
+                            if db_echo is not None:
+                                recent = await db_echo.transcripts.find(
+                                    {"interview_id": interview_id, "speaker": "agent"},
+                                ).sort("timestamp", -1).limit(5).to_list(5)
+                                agent_texts = [r.get("text", "") for r in recent]
+                                if _is_echo(text, agent_texts):
+                                    msg = f"Echo filter (speech_start): suppressed interrupt [{speaker}]: {text[:80]!r}"
+                                    print(msg); await push_log(msg)
+                                    return
+                        except Exception:
+                            pass  # If check fails, proceed with interrupt
+
+                    # Stale DOM check: Google Meet keeps the last caption text in the
+                    # DOM even after the speaker stops. Any unrelated DOM mutation
+                    # (e.g. a new participant notification) re-triggers MutationObserver
+                    # with that stale text — causing a false interrupt right after TTS
+                    # arms. Suppress if the text is already committed as a candidate
+                    # transcript (meaning it's old, not new speech).
+                    if text:
+                        try:
+                            db_stale = mongo_handler.get_db()
+                            if db_stale is not None:
+                                last_candidate = await db_stale.transcripts.find(
+                                    {"interview_id": interview_id, "speaker": "candidate"},
+                                ).sort("timestamp", -1).limit(1).to_list(1)
+                                if last_candidate:
+                                    import re as _re
+                                    def _norm(s):
+                                        return " ".join(_re.sub(r'[^\w\s]', '', s.lower()).split())
+                                    n_text = _norm(text)
+                                    n_committed = _norm(last_candidate[0].get("text", ""))
+                                    if n_text and n_committed and (
+                                        n_text in n_committed or n_committed in n_text
+                                    ):
+                                        msg = f"Stale DOM filter (speech_start): suppressed interrupt [{speaker}]: {text[:80]!r}"
+                                        print(msg); await push_log(msg)
+                                        return
+                        except Exception:
+                            pass  # If check fails, proceed with interrupt
+
                     db = mongo_handler.get_db()
                     if db is None:
                         return
