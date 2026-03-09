@@ -443,7 +443,7 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                     if len(words) >= 8:
                         agent_words = set(agent_norm.split())
                         overlap = len(set(words) & agent_words) / len(words)
-                        if overlap >= 0.95:  # was 0.80 — raised to avoid filtering legitimate replies
+                        if overlap >= 0.85:  # catches STT phonetic variations (e.g. "Agentic AI" → "a genetic AI")
                             return True
                 return False
 
@@ -482,8 +482,10 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                     try:
                         db = mongo_handler.get_db()
                         if db is not None:
+                            cutoff = datetime.utcnow() - timedelta(seconds=15)
                             recent = await db.transcripts.find(
-                                {"interview_id": interview_id, "speaker": "agent"},
+                                {"interview_id": interview_id, "speaker": "agent",
+                                 "timestamp": {"$gte": cutoff}},
                             ).sort("timestamp", -1).limit(10).to_list(10)
                             agent_texts = [r.get("text", "") for r in recent]
                             if _is_echo(full_text, agent_texts):
@@ -536,7 +538,7 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                 try:
                     speaker = event.get("speaker", "Unknown")
                     text    = event.get("text", "").strip()
-                    if "(ai)" in speaker.lower():
+                    if "(ai)" in speaker.lower() or speaker.lower() == "you":
                         return
                     # Already sent for this utterance
                     if speaker in _speech_start_interrupt_sent:
@@ -551,8 +553,10 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                         try:
                             db_echo = mongo_handler.get_db()
                             if db_echo is not None:
+                                cutoff = datetime.utcnow() - timedelta(seconds=15)
                                 recent = await db_echo.transcripts.find(
-                                    {"interview_id": interview_id, "speaker": "agent"},
+                                    {"interview_id": interview_id, "speaker": "agent",
+                                     "timestamp": {"$gte": cutoff}},
                                 ).sort("timestamp", -1).limit(5).to_list(5)
                                 agent_texts = [r.get("text", "") for r in recent]
                                 if _is_echo(text, agent_texts):
@@ -616,10 +620,9 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                     speaker = doc.get("speaker", "Unknown")
                     text = doc.get("text", "").strip()
 
-                    # Skip the bot's own TTS audio — Chrome picks it up as
-                    # captions attributed to the bot's display name which ends
-                    # in " (AI)".
-                    if "(ai)" in speaker.lower() or not text:
+                    # Skip the bot's own TTS audio — Chrome labels it as
+                    # "(AI)" display name, or as "You" (local-user perspective).
+                    if "(ai)" in speaker.lower() or speaker.lower() == "you" or not text:
                         return
 
                     # ── Python-side noise backup ──────────────────────────────
@@ -660,8 +663,10 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                         try:
                             db = mongo_handler.get_db()
                             if db is not None:
+                                cutoff = datetime.utcnow() - timedelta(seconds=15)
                                 recent = await db.transcripts.find(
-                                    {"interview_id": interview_id, "speaker": "agent"},
+                                    {"interview_id": interview_id, "speaker": "agent",
+                                     "timestamp": {"$gte": cutoff}},
                                 ).sort("timestamp", -1).limit(10).to_list(10)
                                 agent_texts = [r.get("text", "") for r in recent]
                                 if _is_echo(text, agent_texts):

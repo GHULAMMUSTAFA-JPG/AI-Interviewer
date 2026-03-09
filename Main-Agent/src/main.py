@@ -170,6 +170,16 @@ async def _watch_new_interviews(db, shutdown_event: asyncio.Event) -> None:
                     interview_id = str(interview.get("interview_id", interview.get("_id", "unknown")))
 
                     logger.info(f"[BOT ADMITTED] {interview_id} — inserting greeting")
+
+                    # Idempotency guard: skip if a greeting was already sent
+                    existing = await db.transcripts.find_one({
+                        "interview_id": interview_id,
+                        "speaker": "agent",
+                    })
+                    if existing:
+                        logger.info(f"[GREETING] Already sent for {interview_id} — skipping duplicate")
+                        continue
+
                     await asyncio.sleep(1)   # Brief pause so candidate can hear the first word
 
                     try:

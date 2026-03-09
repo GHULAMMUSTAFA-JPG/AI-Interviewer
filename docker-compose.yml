@@ -142,9 +142,6 @@ services:
       MONGODB_URI: "mongodb://mongodb:27017/?replicaSet=rs0"
       DISPLAY: ":99"
       PULSE_SERVER: "unix:/var/run/pulse/native"
-    ports:
-      - "6080:6080"   # noVNC — open http://localhost:6080/vnc.html to watch Chrome
-      - "5900:5900"   # Raw VNC (optional — for a native VNC client)
     # Shared memory required for Chrome in Docker
     shm_size: "2gb"
     volumes:

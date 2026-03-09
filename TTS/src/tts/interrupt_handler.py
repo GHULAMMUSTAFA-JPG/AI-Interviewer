@@ -34,6 +34,7 @@ class InterruptHandler:
         self.db = mongo_client[config.mongodb_db]
         self._stop_event = asyncio.Event()
         self._watch_task: Optional[asyncio.Task] = None
+        self._armed_at: float = 0.0
 
     @property
     def stop_event(self) -> asyncio.Event:
@@ -62,6 +63,7 @@ class InterruptHandler:
             except asyncio.CancelledError:
                 pass
 
+        self._armed_at = asyncio.get_event_loop().time()
         self._watch_task = asyncio.create_task(self._watch(interview_id))
         logger.info(f"Interrupt handler armed: interview={interview_id}")
 
@@ -105,6 +107,9 @@ class InterruptHandler:
                 async for change in stream:
                     full_doc = change.get("fullDocument") or {}
                     if full_doc.get("interview_id") == interview_id:
+                        elapsed = asyncio.get_event_loop().time() - self._armed_at
+                        if elapsed < 0.3:
+                            await asyncio.sleep(0.3 - elapsed)
                         logger.info(
                             f"Interrupt received: interview={interview_id} — stopping audio"
                         )

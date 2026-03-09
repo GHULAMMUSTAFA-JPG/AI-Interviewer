@@ -3,7 +3,7 @@ import asyncio
 import logging
 import os
 import signal
-from datetime import datetime, timezone
+from datetime import datetime
 
 from motor.motor_asyncio import AsyncIOMotorClient
 
@@ -30,6 +30,8 @@ class TTSService:
         self._interrupt_handler = InterruptHandler(self._mongo_client)
         self._transcript_updater = TranscriptUpdater(self._mongo_client)
         self._running = False
+        # Tracks interviews that already have a pending resume to prevent cascade
+        self._pending_resumes: set[str] = set()
 
     async def start(self) -> None:
         """Start TTS service."""
@@ -114,12 +116,17 @@ class TTSService:
 
             if self._interrupt_handler.stop_event.is_set():
                 logger.info(f"Transcript interrupted by candidate: {doc.id}")
-                # Schedule a resume check — if the candidate's word was too brief
-                # to trigger a full agent response, re-play the interrupted text
-                # so the conversation doesn't deadlock.
-                asyncio.create_task(
-                    self._maybe_resume(doc.interview_id, doc.text)
-                )
+                # Only schedule resume if not already pending AND this isn't itself
+                # a resumed transcript (prevents cascade of re-resumes).
+                is_resume = getattr(doc, "metadata", None) and (
+                    doc.metadata or {}
+                ).get("resumed_after_interrupt")
+                if not is_resume and doc.interview_id not in self._pending_resumes:
+                    self._pending_resumes.add(doc.interview_id)
+                    interrupted_at = datetime.utcnow()
+                    asyncio.create_task(
+                        self._maybe_resume(doc.interview_id, doc.text, interrupted_at)
+                    )
 
         except Exception as exc:
             logger.error(f"Transcript processing failed: {doc.id} — {exc}")
@@ -132,7 +139,7 @@ class TTSService:
             # Disarm: mark bot as no longer speaking, cancel change stream watcher
             await self._interrupt_handler.disarm(doc.interview_id)
 
-    async def _maybe_resume(self, interview_id: str, text: str) -> None:
+    async def _maybe_resume(self, interview_id: str, text: str, interrupted_at: datetime) -> None:
         """
         After a TTS interrupt, wait 12s for the candidate to say something
         meaningful. If no new agent transcript appears (meaning the pipeline
@@ -146,7 +153,16 @@ class TTSService:
             db = self._mongo_client[config.mongodb_db]
             col = db[config.transcripts_collection]
 
-            interrupted_at = datetime.now(timezone.utc)
+            # Use pre-sleep timestamp (captured before the 12s wait)
+            # If candidate spoke, the pipeline will handle it — don't resume
+            new_candidate = await col.find_one({
+                "interview_id": interview_id,
+                "speaker": "candidate",
+                "timestamp": {"$gt": interrupted_at},
+            })
+            if new_candidate:
+                logger.info(f"Resume check: candidate replied — skip resume [{interview_id}]")
+                return
 
             # Check if a new agent transcript was inserted after the interrupt
             new_agent = await col.find_one({
@@ -176,11 +192,13 @@ class TTSService:
                 "speaker": "agent",
                 "text": text,
                 "audio_url": None,
-                "timestamp": datetime.now(timezone.utc),
+                "timestamp": datetime.utcnow(),
                 "metadata": {"resumed_after_interrupt": True},
             })
         except Exception as exc:
             logger.error(f"Resume check failed [{interview_id}]: {exc}")
+        finally:
+            self._pending_resumes.discard(interview_id)
 
     async def stop(self) -> None:
         """Stop TTS service gracefully."""

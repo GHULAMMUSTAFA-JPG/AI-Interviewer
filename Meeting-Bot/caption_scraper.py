@@ -53,7 +53,7 @@ from pathlib import Path
 from logger import push_log
 
 # ── Configuration ──────────────────────────────────────────────────
-POLL_INTERVAL          = 0.5   # seconds between DOM polls (was 1.0 — halved for faster interrupt detection)
+POLL_INTERVAL          = 0.25  # seconds between DOM polls (halved again — reduces caption latency jitter)
 STABILIZATION_SEC      = 0.7   # seconds a caption must be unchanged before saving (was 1.0)
 SILENT_WARN_SEC        = 30    # log a warning after this many silent seconds
 ENABLE_RETRIES         = 5     # caption-toggle attempts
