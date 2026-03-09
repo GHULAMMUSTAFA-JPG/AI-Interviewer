@@ -888,9 +888,32 @@ class CaptionScraper:
             if elapsed >= self.stabilization_delay:
                 committed += await self._commit_caption(speaker, text, buf, on_caption)
 
-        # Expire Unknown pending entries that never received a real name
+        # Expire Unknown pending entries that never received a real name.
+        # TTL is 5.0 s (was stabilization_delay*2 = 1.4 s).  Google Meet's
+        # name widget can take 2–5 s to appear after the caption text renders,
+        # so a short TTL caused Unknown to commit before the named version
+        # had a chance to cancel it.
+        #
+        # Extra guard: even after 5 s, skip committing Unknown if a named
+        # speaker's live buffer already has text that continues the Unknown
+        # text (the name widget arrived but the speaker is still talking).
+        # The named version will commit on its own stabilization cycle.
         for h, (spk, txt, queued_at) in list(self.pending_unknown.items()):
-            if (now - queued_at) >= self.stabilization_delay * 2:
+            if (now - queued_at) >= 5.0:
+                # Check whether any named speaker's current buffer text
+                # is a continuation of this Unknown text.  If so, hold off —
+                # the named version will commit (and cancel this Unknown entry)
+                # when it stabilises.
+                named_in_flight = any(
+                    sbuf.get("current_text") and
+                    self._is_continuation(txt, sbuf["current_text"])
+                    for spkr, sbuf in self.speaker_buffers.items()
+                    if spkr != "Unknown"
+                    and "(ai)" not in spkr.lower()   # exclude bot echo buffers
+                    and spkr.lower() != "you"        # exclude local-self echo
+                )
+                if named_in_flight:
+                    continue  # leave in pending_unknown; named version wins
                 del self.pending_unknown[h]
                 committed += await self._do_write(spk, txt, on_caption)
 
