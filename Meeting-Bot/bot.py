@@ -544,6 +544,36 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                     if speaker in _speech_start_interrupt_sent:
                         return
 
+                    # CRITICAL: Check bot_speaking state FIRST before any echo filtering.
+                    # If bot IS speaking, this is a candidate INTERRUPTION → send interrupt immediately.
+                    # Echo filtering should ONLY apply when bot is NOT speaking.
+                    db = mongo_handler.get_db()
+                    if db is None:
+                        return
+                    
+                    interview_doc = await db.interviews.find_one(
+                        {"interview_id": interview_id},
+                        projection={"bot_speaking": 1},
+                    )
+                    
+                    bot_speaking = interview_doc and interview_doc.get("bot_speaking") if interview_doc else False
+                    
+                    if bot_speaking:
+                        # Bot IS speaking → this is a candidate interruption → send interrupt
+                        await db.interviews.update_one(
+                            {"interview_id": interview_id},
+                            {"$set": {"tts_interrupt": True}},
+                        )
+                        _speech_start_interrupt_sent.add(speaker)
+                        # Also mark the utterance buffer so on_caption doesn't re-send
+                        if speaker in _utterance_buffers:
+                            _utterance_buffers[speaker]["interrupt_sent"] = True
+                        msg = f"Early interrupt signal sent — candidate started speaking ({speaker})"
+                        print(msg); await push_log(msg)
+                        return
+                    
+                    # Bot NOT speaking → apply echo/stale filters to prevent false interrupts
+                    
                     # Echo check: the MutationObserver fires ~3 s after TTS starts,
                     # carrying the TTS audio as caption text (attributed to "Unknown"
                     # or even the candidate's name by Google Meet).  If the incoming
@@ -594,24 +624,6 @@ async def join_meeting(url: str, email: str, interview_id: str, headless: bool =
                         except Exception:
                             pass  # If check fails, proceed with interrupt
 
-                    db = mongo_handler.get_db()
-                    if db is None:
-                        return
-                    interview_doc = await db.interviews.find_one(
-                        {"interview_id": interview_id},
-                        projection={"bot_speaking": 1},
-                    )
-                    if interview_doc and interview_doc.get("bot_speaking"):
-                        await db.interviews.update_one(
-                            {"interview_id": interview_id},
-                            {"$set": {"tts_interrupt": True}},
-                        )
-                        _speech_start_interrupt_sent.add(speaker)
-                        # Also mark the utterance buffer so on_caption doesn't re-send
-                        if speaker in _utterance_buffers:
-                            _utterance_buffers[speaker]["interrupt_sent"] = True
-                        msg = f"Early interrupt signal sent — candidate started speaking ({speaker})"
-                        print(msg); await push_log(msg)
                 except Exception as e:
                     print(f"on_speech_start error (non-fatal): {e}")
 
