@@ -53,13 +53,18 @@ from pathlib import Path
 from logger import push_log
 
 # ── Configuration ──────────────────────────────────────────────────
-POLL_INTERVAL          = 0.25  # seconds between DOM polls (halved again — reduces caption latency jitter)
-STABILIZATION_SEC      = 0.7   # seconds a caption must be unchanged before saving (was 1.0)
+# Optimized for speed - reduced latency for faster conversation flow
+POLL_INTERVAL          = 0.1   # seconds between DOM polls (reduced for faster detection)
+STABILIZATION_SEC      = 0.3   # seconds a caption must be unchanged before saving (minimal)
 SILENT_WARN_SEC        = 30    # log a warning after this many silent seconds
 ENABLE_RETRIES         = 5     # caption-toggle attempts
 TRANSCRIPT_DIR         = Path("transcription_recordings")
 HASH_DEDUP_WINDOW_SEC  = 15.0  # same text within 15 s = duplicate; after 15 s = treat as new
 SPEAKER_RESET_SEC      = 20.0  # if speaker silent this long, allow same text to be re-committed
+
+# Interrupt validation - prevents false interrupts
+INTERRUPT_VALIDATE_DELAY = 0.8  # seconds to wait before validating interrupt (reduced)
+INTERRUPT_MIN_TEXT_GROWTH = 5   # minimum characters growth to confirm valid speech
 
 # Strings that identify Google Meet UI messages — NOT spoken captions.
 # Any extracted text containing one of these sub-strings is discarded.

@@ -1,0 +1,346 @@
+"""
+speech_injector.py — Web Speech API Injection Module (Streaming STT)
+─────────────────────────────────────────────────────────────────────
+Injects a webkitSpeechRecognition script into the active Google Meet
+page so that meeting audio is transcribed natively by the browser.
+
+Audio routing:
+  Meet audio output → virtual_mic_source.monitor → BotMic → Chrome SpeechRecognition
+  
+Echo cancellation:
+  When bot speaks (bot_speaking=True), STT is paused to avoid transcribing bot's TTS.
+
+Streaming events emitted via console.log for Python capture:
+    STT_INTERIM:<text>                — real-time partial transcript
+    STT_FINAL:<text> CONF:<confidence> — confirmed final transcript
+    STT_SPEECH_START:                 — candidate started speaking
+    STT_SPEECH_END:                   — candidate stopped speaking
+    TRANSCRIPT_EVENT:<text>           — final transcript for backward compat
+
+Window globals exposed:
+    window.__speechActive      — true while recognition is running
+    window.__lastTranscript    — most-recent interim transcript string
+    window.__speechStopped     — set to true to prevent auto-restart
+    window.__pauseSTT          — pause recognition (called when bot speaks)
+    window.__resumeSTT         — resume recognition (called when bot stops)
+"""
+
+from logger import push_log
+
+# ── JavaScript injected into the Meet page ────────────────────────
+#
+# All communication back to Python happens via console.log ONLY.
+# Python captures STT_INTERIM / STT_FINAL / STT_SPEECH_START / STT_SPEECH_END
+# events from page.on("console").
+# No fetch() / XHR is used — zero browser security restrictions.
+#
+# Placeholder (positional):
+#   %s[0] — JSON-encoded session_id string  e.g. "20260306_120000"
+
+_SPEECH_API_JS = r"""
+(function(sessionId) {
+
+    // ── Guard: prevent double-injection ───────────────────────
+    if (window.__speechActive) {
+        console.log('[BOT] Speech recognition already active — skipping re-inject');
+        return;
+    }
+
+    const SpeechRecognition =
+        window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+        console.error('[BOT] SpeechRecognition API not available in this context');
+        console.log('STT_ERROR:SpeechRecognition not available');
+        window.__speechActive = false;
+        return;
+    }
+
+    // ── State globals ──────────────────────────────────────────
+    window.__speechActive       = true;
+    window.__speechStopped      = false;
+    window.__restartPending     = false;
+    window.__lastTranscript     = '';
+    window.__botSpeaking        = false;  // true while TTS is playing — STT paused
+
+    // ── 2-second debounce state ────────────────────────────────
+    // Problem: recognition.continuous=true fires a final event for each
+    // short segment while the candidate is still speaking.  Each final
+    // would fire TRANSCRIPT_EVENT → Gemini → agent interrupts the candidate.
+    //
+    // Fix: Buffer ALL final segments during one speech segment.
+    //      After onspeechend fires, wait SILENCE_MS before emitting.
+    //      If onspeechstart fires again (candidate still talking) → cancel
+    //      the timer and keep buffering.
+    //      After SILENCE_MS of continuous silence → emit accumulated text.
+    // Dynamic silence: ≤10 words → 600ms  |  >20 words → 1200ms  |  else 800ms
+    // Shorter answers flush faster; longer, detailed answers get a full pause.
+    var __speechBuffer      = '';     // accumulates final text in one turn
+    var __silenceTimer      = null;   // pending setTimeout handle
+    var __lastSentText      = '';     // dedup: don't send the same sentence twice
+
+    function _getSilenceMs() {
+        var words = __speechBuffer.trim().split(/\s+/).filter(Boolean).length;
+        if (words > 20) return 1200;
+        if (words <= 10) return 600;
+        return 800;
+    }
+
+    // ── STT pause/resume — called by Python via page.evaluate() ───
+    // __pauseSTT() fires when TTS starts; __resumeSTT() fires when TTS ends.
+    // This prevents the bot from hearing its own voice as candidate input.
+    window.__pauseSTT = function() {
+        window.__botSpeaking = true;
+        if (__silenceTimer !== null) { clearTimeout(__silenceTimer); __silenceTimer = null; }
+        // Flush any buffered candidate speech BEFORE stopping (prevents losing
+        // the candidate's answer if they were mid-sentence when TTS armed).
+        if (__speechBuffer.trim()) {
+            _flushBuffer();
+        } else {
+            __speechBuffer = '';
+        }
+        try { recognition.stop(); } catch(e) {}
+        window.__speechActive = false;
+        console.log('[STT] PAUSED — bot is speaking, STT suppressed');
+    };
+
+    window.__resumeSTT = function() {
+        window.__botSpeaking = false;
+        if (!window.__speechStopped && !window.__restartPending) {
+            var _attempts = 0;
+            function _tryStart() {
+                try {
+                    recognition.start();
+                    window.__speechActive = true;
+                    console.log('[STT] RESUMED — listening for candidate');
+                } catch(e) {
+                    _attempts++;
+                    if (_attempts < 5) {
+                        // Chrome briefly refuses rapid start/stop — retry with back-off
+                        setTimeout(_tryStart, 300 * _attempts);
+                    } else {
+                        console.warn('[STT] __resumeSTT exhausted retries: ' + e.message);
+                    }
+                }
+            }
+            _tryStart();
+        }
+    };
+
+    function _flushBuffer() {
+        var text = __speechBuffer.trim();
+        __speechBuffer = '';
+        __silenceTimer = null;
+        if (!text) return;
+        if (text === __lastSentText) {
+            console.log('[BOT] [STT] Duplicate suppressed: ' + text.substring(0, 60));
+            return;
+        }
+        __lastSentText = text;
+        console.log('[STT] Candidate: ' + text);
+        console.log('STT_FINAL:' + text + ' CONF:1.00');
+        // Backward compat: still emit TRANSCRIPT_EVENT for Python capture
+        console.log('TRANSCRIPT_EVENT:' + text);
+    }
+
+    // ── Configure recognition ──────────────────────────────────
+    const recognition           = new SpeechRecognition();
+    recognition.continuous      = true;
+    recognition.interimResults  = true;
+    recognition.lang            = 'en-US';
+    recognition.maxAlternatives = 1;
+
+    window.__speechRecognition  = recognition;
+
+    // ── Event handlers ─────────────────────────────────────────
+    recognition.onstart = function() {
+        window.__speechActive = true;
+        console.log('🎤 [BOT] Speech recognition active  session=' + sessionId);
+    };
+
+    recognition.onaudiostart = function() {
+        console.log('🔊 [BOT] Audio capture started — BotMic input received');
+    };
+
+    recognition.onspeechstart = function() {
+        // Cancel any pending flush — candidate is still speaking
+        if (__silenceTimer !== null) {
+            clearTimeout(__silenceTimer);
+            __silenceTimer = null;
+            console.log('[BOT] [STT] Speech resumed — silence timer cancelled');
+        }
+        console.log('STT_SPEECH_START:');
+        // Signal candidate started speaking (for interrupt detection)
+        console.log('STT_SPEECH_START:');
+    };
+
+    recognition.onspeechend = function() {
+        console.log('[BOT] Speech segment ended');
+        console.log('STT_SPEECH_END:');
+        // Start silence timer — emit buffered text after SILENCE_MS
+        if (__silenceTimer !== null) {
+            clearTimeout(__silenceTimer);
+        }
+        __silenceTimer = setTimeout(function() {
+            _flushBuffer();
+        }, _getSilenceMs());
+    };
+
+    recognition.onnomatch = function() {
+        console.warn('[BOT] No speech match returned for this segment');
+    };
+
+    recognition.onresult = function(event) {
+        var interimText = '';
+
+        for (var i = event.resultIndex; i < event.results.length; i++) {
+            var text = event.results[i][0].transcript;
+            var conf = event.results[i][0].confidence;
+            if (event.results[i].isFinal) {
+                // Accumulate into buffer — do NOT emit yet
+                __speechBuffer += (text + ' ');
+                console.log('[AGENT] Generating response');
+                console.log('💬 [BOT] Buffered final: ' + text.trim());
+            } else {
+                interimText += text;
+            }
+        }
+
+        window.__lastTranscript = interimText || __speechBuffer;
+
+        if (interimText.trim()) {
+            console.log('STT_INTERIM:' + interimText.trim());
+        }
+    };
+
+    recognition.onerror = function(event) {
+        console.error('❌ [BOT] SpeechRecognition error: ' + event.error +
+                      '  (message: ' + (event.message || 'none') + ')');
+        window.__speechActive = false;
+
+        // Do NOT restart if bot is speaking — 'no-speech' errors are normal
+        // when STT is intentionally capturing silence (bot's own TTS audio).
+        if (!window.__speechStopped && !window.__botSpeaking) {
+            window.__restartPending = true;
+            setTimeout(function() {
+                window.__restartPending = false;
+                if (!window.__speechStopped && !window.__botSpeaking) {
+                    try {
+                        recognition.start();
+                        window.__speechActive = true;
+                        console.log('[BOT] Restarted after error: ' + event.error);
+                    } catch(e) {
+                        console.warn('[BOT] Restart after error failed: ' + e.message);
+                    }
+                }
+            }, 2000);
+        }
+    };
+
+    recognition.onend = function() {
+        console.log('⚠️  [BOT] SpeechRecognition ended — will restart');
+        window.__speechActive = false;
+
+        // Flush any buffered text before restarting (e.g. network reset mid-speech)
+        if (__speechBuffer.trim() && __silenceTimer === null) {
+            _flushBuffer();
+        }
+
+        if (window.__restartPending) {
+            console.log('[BOT] Restart already pending — onend skipping');
+            return;
+        }
+
+        if (!window.__speechStopped && !window.__botSpeaking) {
+            try {
+                recognition.start();
+                window.__speechActive = true;
+                console.log('[BOT] SpeechRecognition restarted');
+            } catch(e) {
+                console.warn('[BOT] Immediate restart failed, retrying in 1s: ' + e.message);
+                setTimeout(function() {
+                    if (!window.__speechStopped && !window.__restartPending && !window.__botSpeaking) {
+                        try { recognition.start(); window.__speechActive = true; } catch(_) {}
+                    }
+                }, 1000);
+            }
+        }
+    };
+
+    // ── Start: enumerate devices (log only), then start recognition ──
+    //
+    // Chrome's SpeechRecognition uses the system default audio source,
+    // which we set via pactl in entrypoint.sh:
+    //   pactl load-module module-loopback source=virtual_mic_source.monitor sink=BotMic
+    //   pactl set-default-source BotMic
+    //
+    // This routes: Meet audio output → virtual_mic_source.monitor → BotMic → STT
+    console.log('[BOT] [STT] Enumerating audio devices for diagnostics...');
+    navigator.mediaDevices.enumerateDevices()
+        .then(function(devices) {
+            var audioInputs = devices.filter(function(d) { return d.kind === 'audioinput'; });
+            console.log('[BOT] [STT] Audio inputs visible: ' + audioInputs.length);
+            audioInputs.forEach(function(d) {
+                console.log('STT_DEVICE:' + d.label + '  id=' + d.deviceId);
+            });
+            var botMic = audioInputs.find(function(d) {
+                return d.label && (
+                    d.label.toLowerCase().includes('botmic') ||
+                    d.label.toLowerCase().includes('monitor')
+                );
+            });
+            if (botMic) {
+                console.log('🎯 [BOT] [STT] BotMic/Monitor confirmed visible: ' + botMic.label);
+            } else {
+                console.log('⚠️  [BOT] [STT] BotMic/Monitor label not visible — using system default');
+            }
+        })
+        .catch(function(err) {
+            console.warn('[BOT] [STT] enumerateDevices failed: ' + err.message);
+        })
+        .finally(function() {
+            // Start recognition unconditionally.
+            // Chrome SpeechRecognition uses system default (BotMic via pactl)
+            try {
+                recognition.start();
+                console.log('[BOT] [STT] SpeechRecognition.start() called — using BotMic (system default)');
+            } catch(e) {
+                console.error('[BOT] [STT] recognition.start() failed: ' + e.message);
+                window.__speechActive = false;
+                console.log('STT_ERROR:' + e.message);
+            }
+        });
+
+})(%s);
+"""
+
+
+async def inject_speech_recognition(
+    page,
+    session_id: str,
+) -> None:
+    """
+    Inject the Web Speech API transcription script into *page*.
+
+    Transcripts are emitted as console.log("TRANSCRIPT_EVENT:<text>") and
+    captured by the page.on("console") handler in bot.py.
+    
+    Audio routing:
+      Meet audio → virtual_mic_source.monitor → BotMic → SpeechRecognition
+      
+    Echo cancellation:
+      STT pauses when bot_speaking=True (via window.__pauseSTT)
+    """
+    import json as _json
+    js = _SPEECH_API_JS % (_json.dumps(session_id),)
+
+    try:
+        await page.evaluate(js)
+        msg = "✅ Web Speech API injected — transcripts via console.log TRANSCRIPT_EVENT"
+        print(msg)
+        await push_log(msg)
+    except Exception as e:
+        msg = f"❌ Speech injection failed: {e}"
+        print(msg)
+        await push_log(msg)
+        raise

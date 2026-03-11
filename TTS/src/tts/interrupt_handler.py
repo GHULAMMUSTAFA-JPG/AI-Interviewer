@@ -9,6 +9,7 @@ Flow:
      - Clears stop_event
      - Sets bot_speaking=True, tts_interrupt=False on the interview document
      - Starts a background change stream task watching for tts_interrupt=True
+     - Blocks interrupts for first 500ms (bot always completes first 2-3 words)
   2. AudioPlayer checks stop_event on every PCM chunk. When set, pacat is killed.
   3. Meeting-Bot sets tts_interrupt=True when a caption arrives while bot is speaking.
      - Change stream fires -> stop_event.set() -> audio stops mid-stream.
@@ -18,6 +19,7 @@ Flow:
 """
 import asyncio
 import logging
+import time
 from typing import Optional
 
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -25,6 +27,9 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from .config import config
 
 logger = logging.getLogger(__name__)
+
+# Interrupt block window - bot always completes first 500ms of speech (2-3 words)
+INTERRUPT_BLOCK_WINDOW_SEC = 0.5
 
 
 class InterruptHandler:
@@ -35,6 +40,7 @@ class InterruptHandler:
         self._stop_event = asyncio.Event()
         self._watch_task: Optional[asyncio.Task] = None
         self._armed_at: float = 0.0
+        self._block_until: float = 0.0  # Timestamp until which interrupts are blocked
 
     @property
     def stop_event(self) -> asyncio.Event:
@@ -47,6 +53,7 @@ class InterruptHandler:
         - Set bot_speaking=True, tts_interrupt=False on the interview document
           (clears any stale interrupt flag from the previous turn).
         - Start the background change stream watcher for this interview.
+        - Block interrupts for first 500ms (bot always completes first 2-3 words).
         """
         self._stop_event.clear()
 
@@ -64,8 +71,11 @@ class InterruptHandler:
                 pass
 
         self._armed_at = asyncio.get_event_loop().time()
+        # Block interrupts for first 500ms - bot always completes first 2-3 words
+        self._block_until = self._armed_at + INTERRUPT_BLOCK_WINDOW_SEC
+        
         self._watch_task = asyncio.create_task(self._watch(interview_id))
-        logger.info(f"Interrupt handler armed: interview={interview_id}")
+        logger.info(f"Interrupt handler armed: interview={interview_id} (blocked until {self._block_until - self._armed_at:.3f}s)")
 
     async def disarm(self, interview_id: str) -> None:
         """
@@ -91,6 +101,7 @@ class InterruptHandler:
 
         Fires when tts_interrupt becomes True on the given interview.
         Sets stop_event so AudioPlayer stops mid-stream.
+        Blocks interrupts for first 500ms to let bot complete first 2-3 words.
         """
         pipeline = [
             {
@@ -108,8 +119,16 @@ class InterruptHandler:
                     full_doc = change.get("fullDocument") or {}
                     if full_doc.get("interview_id") == interview_id:
                         elapsed = asyncio.get_event_loop().time() - self._armed_at
+                        
+                        # Check if we're still in the block window
+                        if elapsed < INTERRUPT_BLOCK_WINDOW_SEC:
+                            logger.debug(f"Interrupt blocked (first {INTERRUPT_BLOCK_WINDOW_SEC}s): interview={interview_id}")
+                            await asyncio.sleep(INTERRUPT_BLOCK_WINDOW_SEC - elapsed)
+                        
+                        # Add small delay to ensure bot audio actually started
                         if elapsed < 0.3:
                             await asyncio.sleep(0.3 - elapsed)
+                            
                         logger.info(
                             f"Interrupt received: interview={interview_id} — stopping audio"
                         )
