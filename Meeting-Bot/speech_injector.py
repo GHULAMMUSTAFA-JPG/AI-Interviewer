@@ -4,25 +4,19 @@ speech_injector.py — Web Speech API Injection Module (Streaming STT)
 Injects a webkitSpeechRecognition script into the active Google Meet
 page so that meeting audio is transcribed natively by the browser.
 
-Audio routing:
-  Meet audio output → virtual_mic_source.monitor → BotMic → Chrome SpeechRecognition
-  
-Echo cancellation:
-  When bot speaks (bot_speaking=True), STT is paused to avoid transcribing bot's TTS.
-
 Streaming events emitted via console.log for Python capture:
     STT_INTERIM:<text>                — real-time partial transcript
     STT_FINAL:<text> CONF:<confidence> — confirmed final transcript
     STT_SPEECH_START:                 — candidate started speaking
     STT_SPEECH_END:                   — candidate stopped speaking
-    TRANSCRIPT_EVENT:<text>           — final transcript for backward compat
+    TRANSCRIPT_EVENT:<text>           — final transcript for Python capture
 
 Window globals exposed:
     window.__speechActive      — true while recognition is running
     window.__lastTranscript    — most-recent interim transcript string
     window.__speechStopped     — set to true to prevent auto-restart
-    window.__pauseSTT          — pause recognition (called when bot speaks)
-    window.__resumeSTT         — resume recognition (called when bot stops)
+    window.__speechRecognition — the active SpeechRecognition instance
+    window.__botSpeaking       — true while TTS is playing — STT paused
 """
 
 from logger import push_log
@@ -51,7 +45,6 @@ _SPEECH_API_JS = r"""
 
     if (!SpeechRecognition) {
         console.error('[BOT] SpeechRecognition API not available in this context');
-        console.log('STT_ERROR:SpeechRecognition not available');
         window.__speechActive = false;
         return;
     }
@@ -159,7 +152,7 @@ _SPEECH_API_JS = r"""
     };
 
     recognition.onaudiostart = function() {
-        console.log('🔊 [BOT] Audio capture started — BotMic input received');
+        console.log('🔊 [BOT] Audio capture started — microphone input received');
     };
 
     recognition.onspeechstart = function() {
@@ -170,14 +163,12 @@ _SPEECH_API_JS = r"""
             console.log('[BOT] [STT] Speech resumed — silence timer cancelled');
         }
         console.log('STT_SPEECH_START:');
-        // Signal candidate started speaking (for interrupt detection)
-        console.log('STT_SPEECH_START:');
     };
 
     recognition.onspeechend = function() {
         console.log('[BOT] Speech segment ended');
         console.log('STT_SPEECH_END:');
-        // Start silence timer — emit buffered text after SILENCE_MS
+        // Start 2-second silence timer — emit buffered text after SILENCE_MS
         if (__silenceTimer !== null) {
             clearTimeout(__silenceTimer);
         }
@@ -269,13 +260,25 @@ _SPEECH_API_JS = r"""
 
     // ── Start: enumerate devices (log only), then start recognition ──
     //
-    // Chrome's SpeechRecognition uses the system default audio source,
-    // which we set via pactl in entrypoint.sh:
-    //   pactl load-module module-loopback source=virtual_mic_source.monitor sink=BotMic
-    //   pactl set-default-source BotMic
+    // By the time this script is injected:
+    //   1. Google Meet has already called getUserMedia() for its WebRTC peer connection
+    //      (mic unmuted via _ensure_mic_on). Meet's outgoing WebRTC audio track is
+    //      PERMANENTLY bound to virtual_mic_source (the TTS output path).
+    //   2. pactl set-default-source BotMic has been called in Python, so
+    //      any NEW getUserMedia call on this page (including Chrome's internal
+    //      SpeechRecognition) will open BotMic.
     //
-    // This routes: Meet audio output → virtual_mic_source.monitor → BotMic → STT
-    console.log('[BOT] [STT] Enumerating audio devices for diagnostics...');
+    // CRITICAL — DO NOT call getUserMedia() here for any reason:
+    //   Any getUserMedia() call in the Meet tab (even a briefly-stopped stream) causes
+    //   Google Meet to attempt WebRTC renegotiation and switch its outgoing mic track from
+    //   virtual_mic_source to the newly-opened device. This permanently breaks TTS audio
+    //   routing: pacat writes to virtual_mic → virtual_mic_source → Meet WebRTC, but if
+    //   Meet renegotiates to BotMic, TTS audio goes nowhere the candidate can hear.
+    //
+    // Chrome's SpeechRecognition opens its own getUserMedia in a SEPARATE sandboxed
+    // audio service process — completely isolated from the Meet renderer's WebRTC
+    // negotiation. It will use the pactl default source = BotMic. No action needed.
+    console.log('[BOT] [STT] Enumerating audio devices for diagnostics (no getUserMedia)...');
     navigator.mediaDevices.enumerateDevices()
         .then(function(devices) {
             var audioInputs = devices.filter(function(d) { return d.kind === 'audioinput'; });
@@ -286,13 +289,14 @@ _SPEECH_API_JS = r"""
             var botMic = audioInputs.find(function(d) {
                 return d.label && (
                     d.label.toLowerCase().includes('botmic') ||
-                    d.label.toLowerCase().includes('monitor')
+                    d.label.toLowerCase().includes('botmiccapture') ||
+                    d.label.toLowerCase().includes('monitor of virtualsink')
                 );
             });
             if (botMic) {
-                console.log('🎯 [BOT] [STT] BotMic/Monitor confirmed visible: ' + botMic.label);
+                console.log('🎯 [BOT] [STT] BotMicCapture confirmed visible: ' + botMic.label);
             } else {
-                console.log('⚠️  [BOT] [STT] BotMic/Monitor label not visible — using system default');
+                console.log('⚠️  [BOT] [STT] BotMicCapture label not visible — pactl default (BotMic) will be used');
             }
         })
         .catch(function(err) {
@@ -300,14 +304,14 @@ _SPEECH_API_JS = r"""
         })
         .finally(function() {
             // Start recognition unconditionally.
-            // Chrome SpeechRecognition uses system default (BotMic via pactl)
+            // Chrome SpeechRecognition opens its own isolated getUserMedia on pactl default = BotMic.
+            // This does NOT touch Meet's existing WebRTC track on virtual_mic_source.
             try {
                 recognition.start();
-                console.log('[BOT] [STT] SpeechRecognition.start() called — using BotMic (system default)');
+                console.log('[BOT] [STT] SpeechRecognition.start() called — BotMic via pactl default');
             } catch(e) {
                 console.error('[BOT] [STT] recognition.start() failed: ' + e.message);
                 window.__speechActive = false;
-                console.log('STT_ERROR:' + e.message);
             }
         });
 
@@ -324,12 +328,6 @@ async def inject_speech_recognition(
 
     Transcripts are emitted as console.log("TRANSCRIPT_EVENT:<text>") and
     captured by the page.on("console") handler in bot.py.
-    
-    Audio routing:
-      Meet audio → virtual_mic_source.monitor → BotMic → SpeechRecognition
-      
-    Echo cancellation:
-      STT pauses when bot_speaking=True (via window.__pauseSTT)
     """
     import json as _json
     js = _SPEECH_API_JS % (_json.dumps(session_id),)

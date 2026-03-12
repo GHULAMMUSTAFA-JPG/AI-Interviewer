@@ -1,7 +1,7 @@
 """
-Meeting-Bot persistent service.
+main.py — Meeting-Bot Entry Point (Web Speech API Mode)
 
-Watches interviews.interviews for new inserts (status="in_progress")
+Watches interviews.interviews for new in_progress inserts
 and spawns a browser bot for each meeting URL.
 """
 
@@ -11,12 +11,12 @@ import signal
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 
-from bot import join_meeting
+from bot import join_meeting_and_transcribe
 from logger import push_log
 
 load_dotenv()
 
-MONGO_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+MONGO_URI = os.getenv("MONGODB_URI", "mongodb://mongodb:27017/?replicaSet=rs0")
 BOT_EMAIL = os.getenv("BOT_EMAIL", "bot@example.com")
 DB_NAME = "interviews"
 
@@ -51,7 +51,7 @@ async def run_bot(interview: dict) -> None:
     msg = f"Starting bot for interview_id={interview_id}  url={meeting_url}"
     print(msg); await push_log(msg)
 
-    await join_meeting(
+    await join_meeting_and_transcribe(
         url=meeting_url,
         email=BOT_EMAIL,
         interview_id=interview_id,
@@ -75,8 +75,6 @@ async def main() -> None:
     print(msg); await push_log(msg)
 
     # Tracks interview_ids that currently have an active bot task.
-    # Prevents spawning a second browser if the container restarts while a
-    # meeting is still in_progress, or if the same interview_id is inserted twice.
     _active: set[str] = set()
 
     async def _run_and_release(interview: dict) -> None:
@@ -86,43 +84,41 @@ async def main() -> None:
         finally:
             _active.discard(interview_id)
 
-    pipeline = [{"$match": {"operationType": "insert"}}]
-
-    async with db.interviews.watch(pipeline) as stream:
+    async with db["interviews"].watch(
+        [{"$match": {"operationType": "insert"}}],
+        full_document="updateLookup",
+    ) as stream:
         async for change in stream:
-            if shutdown_event.is_set():
-                break
-
-            interview = change["fullDocument"]
-            status = interview.get("status", "")
+            full_doc = change.get("fullDocument") or {}
+            status = full_doc.get("status", "")
 
             if status != "in_progress":
                 continue
 
-            interview_id = str(interview.get("interview_id", interview.get("_id", "unknown")))
+            interview_id = full_doc.get("interview_id", "unknown")
 
-            # Skip if a bot is already running for this interview
             if interview_id in _active:
-                msg = f"Bot already active for {interview_id} — skipping duplicate"
-                print(msg); await push_log(msg)
-                continue
-
-            # Also check DB: if bot_status is already set, another instance already joined
-            existing = await db.interviews.find_one(
-                {"interview_id": interview_id},
-                projection={"bot_status": 1}
-            )
-            if existing and existing.get("bot_status"):
-                msg = f"bot_status already set for {interview_id} — skipping"
+                msg = f"Bot already running for {interview_id} — skipping duplicate"
                 print(msg); await push_log(msg)
                 continue
 
             _active.add(interview_id)
-            asyncio.create_task(_run_and_release(interview))
+            asyncio.create_task(_run_and_release(full_doc))
+
+            if shutdown_event.is_set():
+                break
+
+    for interview_id in list(_active):
+        msg = f"Waiting for bot {interview_id} to finish..."
+        print(msg); await push_log(msg)
+
+    await shutdown_event.wait()
+
+    for interview_id in list(_active):
+        msg = f"Shutting down bot for {interview_id}..."
+        print(msg); await push_log(msg)
 
     client.close()
-    msg = "Meeting-Bot stopped"
-    print(msg); await push_log(msg)
 
 
 if __name__ == "__main__":

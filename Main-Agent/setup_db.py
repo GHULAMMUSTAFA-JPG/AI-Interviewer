@@ -4,6 +4,7 @@ MongoDB database setup script.
 Creates collections, indexes, and sample data for testing.
 """
 import asyncio
+import os
 from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorClient
 
@@ -11,8 +12,12 @@ from motor.motor_asyncio import AsyncIOMotorClient
 async def setup_database():
     """Setup MongoDB collections, indexes, and sample data"""
 
-    client = AsyncIOMotorClient("mongodb://localhost:27017")
-    db = client["interviews"]
+    # Use environment variable or default to localhost
+    mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+    mongo_db = os.getenv("MONGODB_DB", "interviews")
+    
+    client = AsyncIOMotorClient(mongo_uri)
+    db = client[mongo_db]
 
     print("Setting up MongoDB database...")
 

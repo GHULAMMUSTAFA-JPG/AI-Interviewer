@@ -146,9 +146,7 @@ async def _watch_new_interviews(db, shutdown_event: asyncio.Event) -> None:
     We wait for Meeting-Bot to set bot_status='admitted' (after the mic is
     confirmed unmuted) rather than on the raw insert.
 
-    We deliberately do NOT gate on participant_joined because DOM-based
-    participant detection inside Google Meet is unreliable — selectors change
-    with Meet updates and return wrong counts, causing the greeting to never fire.
+    NOTE: No resume token - always start from NOW to catch new admissions.
     """
     pipeline = [
         {
