@@ -89,11 +89,14 @@ RUN mkdir -p /root/.config/pulse /var/run/pulse && \
     echo "default-sample-rate = 48000" >> /etc/pulse/daemon.conf && \
     echo "alternate-sample-rate = 44100" >> /etc/pulse/daemon.conf && \
     echo "exit-idle-time = -1" >> /etc/pulse/daemon.conf && \
-    # Replace the existing unix socket line to add auth-anonymous=1.
-    # Appending would create a duplicate entry; the original line loads first
-    # without auth-anonymous and blocks anonymous connections from TTS/pacat.
-    sed -i 's/load-module module-native-protocol-unix$/load-module module-native-protocol-unix auth-anonymous=1/' \
-        /etc/pulse/system.pa
+    # Create default.pa for non-system mode (used by entrypoint.sh)
+    echo 'load-module module-native-protocol-unix auth-anonymous=1 socket=/var/run/pulse/native' > /etc/pulse/default.pa && \
+    echo 'load-module module-null-sink sink_name=virtual_mic sink_properties=device.description=VirtualMic' >> /etc/pulse/default.pa && \
+    echo 'load-module module-remap-source source_name=virtual_mic_source master=virtual_mic.monitor source_properties=device.description=VirtualMicSource' >> /etc/pulse/default.pa && \
+    echo 'set-default-sink virtual_mic' >> /etc/pulse/default.pa && \
+    echo 'set-default-source virtual_mic_source' >> /etc/pulse/default.pa && \
+    # Also fix system.pa for backwards compatibility
+    sed -i 's/load-module module-native-protocol-unix$/load-module module-native-protocol-unix auth-anonymous=1/' /etc/pulse/system.pa
 
 # ════════════════════════════════════════════════════════════════════════════════
 # Chrome Dependencies — Libraries required by Chromium

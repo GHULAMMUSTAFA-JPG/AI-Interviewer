@@ -127,11 +127,14 @@ async def interview_status(interview_id: str = Path(...)):
     db = _get_db()
     doc = await db["interviews"].find_one(
         {"interview_id": interview_id},
-        {"status": 1, "_id": 0},
+        {"status": 1, "bot_status": 1, "_id": 0},
     )
     if not doc:
         raise HTTPException(status_code=404, detail="Interview not found")
-    return JSONResponse({"status": doc.get("status")})
+    return JSONResponse({
+        "status": doc.get("status"),
+        "bot_status": doc.get("bot_status", "pending"),
+    })
 
 
 @app.get("/conversations", response_class=HTMLResponse)

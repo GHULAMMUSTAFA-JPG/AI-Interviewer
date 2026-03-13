@@ -167,7 +167,7 @@ async def _watch_new_interviews(db, shutdown_event: asyncio.Event) -> None:
                     interview = change.get("fullDocument") or {}
                     interview_id = str(interview.get("interview_id", interview.get("_id", "unknown")))
 
-                    logger.info(f"[BOT ADMITTED] {interview_id} — inserting greeting")
+                    logger.info(f"[BOT ADMITTED] {interview_id} — waiting 5 seconds before inserting greeting")
 
                     # Idempotency guard: skip if a greeting was already sent
                     existing = await db.transcripts.find_one({
@@ -178,15 +178,18 @@ async def _watch_new_interviews(db, shutdown_event: asyncio.Event) -> None:
                         logger.info(f"[GREETING] Already sent for {interview_id} — skipping duplicate")
                         continue
 
-                    await asyncio.sleep(1)   # Brief pause so candidate can hear the first word
+                    # Wait 8 seconds total (5 + 3 from bot) for bot to fully join audio
+                    logger.info(f"[GREETING] Waiting 8 seconds for audio to stabilize...")
+                    await asyncio.sleep(8)
 
                     try:
                         await db.transcripts.insert_one({
                             "interview_id": interview_id,
                             "speaker": "agent",
                             "text": (
-                                "Hello! Welcome to your interview. "
-                                "Could you please start by introducing yourself?"
+                                "Hello! Welcome to your technical interview today. "
+                                "I'm excited to speak with you. "
+                                "To start, could you please introduce yourself and tell me about your background?"
                             ),
                             "audio_url": None,
                             "timestamp": datetime.utcnow(),

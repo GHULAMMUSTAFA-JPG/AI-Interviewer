@@ -63,12 +63,20 @@
     </form>
 
     <div id="result" class="result hidden"></div>
+    
+    <div id="botStatus" class="bot-status hidden">
+      <div class="status-indicator">
+        <span class="status-dot"></span>
+        <span class="status-text">Waiting for bot to join...</span>
+      </div>
+    </div>
   </div>
 
   <script>
     const form = document.getElementById('interviewForm');
     const result = document.getElementById('result');
     const btn = document.getElementById('submitBtn');
+    const botStatus = document.getElementById('botStatus');
     let currentInterviewId = null;
 
     // Persist text fields across reloads
@@ -85,6 +93,7 @@
       btn.disabled = true;
       btn.textContent = 'Starting...';
       result.className = 'result hidden';
+      botStatus.classList.add('hidden');
 
       const data = new FormData(form);
 
@@ -102,6 +111,8 @@
             Interview ID: <code>${json.interview_id}</code><br/><br/>
             <button id="leaveBtn" class="leave-btn" onclick="leaveInterview()">Leave Meeting</button>
           `;
+          // Show bot status
+          botStatus.classList.remove('hidden');
           startStatusPolling(json.interview_id);
         } else {
           throw new Error(JSON.stringify(json));
@@ -122,23 +133,42 @@
           const res = await fetch(`/status/${interviewId}`);
           if (!res.ok) return;
           const json = await res.json();
-          if (json.status !== 'in_progress') {
+          
+          // Update bot status text
+          const statusText = botStatus.querySelector('.status-text');
+          const statusDot = botStatus.querySelector('.status-dot');
+          
+          // Check status FIRST (meeting ended takes priority)
+          if (json.status === 'abandoned' || json.status === 'completed') {
+            statusText.textContent = 'Meeting ended';
+            statusDot.className = 'status-dot ended';
             stopStatusPolling();
-            resetForm(json.status);
+            resetForm();
+            return;
+          }
+          
+          // Then check bot_status
+          if (json.bot_status === 'pending') {
+            statusText.textContent = 'Bot joining meeting...';
+            statusDot.className = 'status-dot pending';
+          } else if (json.bot_status === 'admitted') {
+            statusText.textContent = 'Bot in meeting - Ready!';
+            statusDot.className = 'status-dot ready';
           }
         } catch (_) { /* ignore network blips */ }
-      }, 3000);
+      }, 2000);
     }
 
     function stopStatusPolling() {
       if (_statusPoller) { clearInterval(_statusPoller); _statusPoller = null; }
     }
 
-    function resetForm(endStatus) {
+    function resetForm() {
       currentInterviewId = null;
       btn.disabled = false;
       btn.textContent = 'Start Interview';
       result.className = 'result hidden';
+      botStatus.classList.add('hidden');
     }
 
     async function leaveInterview() {

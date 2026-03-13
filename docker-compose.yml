@@ -106,7 +106,7 @@ services:
       mongo-init:
         condition: service_completed_successfully
       meeting-bot:
-        condition: service_started   # Wait for Meeting-Bot's PulseAudio to start
+        condition: service_healthy   # Wait for Meeting-Bot's PulseAudio to be ready
     env_file: .env
     environment:
       MONGODB_URI: "mongodb://mongodb:27017/?replicaSet=rs0"
@@ -122,6 +122,12 @@ services:
     networks:
       - interview-net
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import pymongo; pymongo.MongoClient('mongodb://mongodb:27017').admin.command('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   # ────────────────────────────────────────────────────────────────
   # Meeting-Bot: headless Chrome + caption scraper.
@@ -151,6 +157,12 @@ services:
     networks:
       - interview-net
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bash", "-c", "pactl info &>/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
 
   # ────────────────────────────────────────────────────────────────
   # UI: FastAPI web form.

@@ -1,38 +1,141 @@
 """
-Meeting-Bot: joins a Google Meet and scrapes captions into interviews.transcripts.
+bot.py — Google Meet Bot (Web Speech API Mode)
+─────────────────────────────────────────────────────────────────────
+Joins Google Meet as a guest and transcribes speech via Web Speech API.
 
-Key differences from STT/bot_logic.py:
-  - Accepts interview_id — all DB writes are keyed to a specific interview.
-  - Filters out bot's own speech: any speaker name containing "(AI)" is skipped.
-  - Writes ONLY to interviews.transcripts with speaker="candidate".
-  - No summary / meeting metadata write (not needed here).
+BATCH PROCESSING:
+- Captures ALL speech during meeting
+- Buffers everything locally
+- At meeting end: inserts ONE final transcript with complete conversation
+- Agent then processes the entire conversation at once
+
+NO real-time inserts. NO back-and-forth during meeting.
 """
 
 import asyncio
-import re
+import os
+import shutil
+import tempfile
+from datetime import datetime
 from pathlib import Path
-from datetime import datetime, timedelta
+
 from playwright.async_api import async_playwright
 
-from caption_scraper import scrape_meeting_captions
 from logger import push_log
-import mongo_handler
 from mongo_handler import (
     connect_to_mongo,
     disconnect_from_mongo,
     insert_transcript,
 )
+from speech_injector import inject_speech_recognition
+
+# Store captured transcripts locally during meeting (BATCH mode)
+_transcript_buffer = []
+
+
+async def _ensure_mic_on(page) -> None:
+    """Ensure Google Meet's microphone is UNMUTED."""
+    mic_off_selectors = [
+        'button[aria-label="Turn on microphone"]',
+        'button[aria-label="Unmute microphone"]',
+    ]
+    for attempt in range(4):
+        for sel in mic_off_selectors:
+            try:
+                btn = page.locator(sel)
+                if await btn.count() > 0 and await btn.first.is_visible():
+                    await btn.first.click()
+                    await page.wait_for_timeout(500)
+                    msg = f"✅ Microphone unmuted (attempt {attempt+1})"
+                    print(msg); await push_log(msg)
+                    return
+            except Exception:
+                pass
+        await page.wait_for_timeout(500)
+    msg = "ℹ️  Microphone already on"
+    print(msg); await push_log(msg)
+
+
+async def _disable_camera(page) -> None:
+    """Turn off the camera."""
+    cam_selectors = [
+        'button[aria-label="Turn off camera"]',
+        'button[aria-label*="camera" i][aria-pressed="false"]',
+    ]
+    for attempt in range(5):
+        for sel in cam_selectors:
+            try:
+                btn = page.locator(sel)
+                if await btn.count() > 0 and await btn.first.is_visible():
+                    await btn.first.click()
+                    await page.wait_for_timeout(400)
+                    msg = f"✅ Camera disabled (attempt {attempt + 1})"
+                    print(msg); await push_log(msg)
+                    return
+            except Exception:
+                pass
+        await page.wait_for_timeout(500)
+    msg = "ℹ️  Camera already off"
+    print(msg); await push_log(msg)
 
 
 async def _watch_for_leave(interview_id: str, page) -> None:
     """
-    Background task: polls interviews.interviews every 1 s. When status becomes
-    'abandoned' or 'completed', clicks the Leave call button and navigates away
-    as a guaranteed fallback — which cancels the sibling tasks (caption scraper
-    + audio watcher).
+    Background task: polls interviews.interviews every 0.3s.
+    When status becomes 'abandoned' or 'completed', exits IMMEDIATELY.
+
+    Also includes a 5-minute timeout as fallback.
     """
+    start_time = asyncio.get_event_loop().time()
+    timeout_seconds = 300  # 5 minutes fallback
+    last_status_check = None
+
     while True:
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.3)  # Poll 3 times per second for instant response
+
+        # Check timeout
+        elapsed = asyncio.get_event_loop().time() - start_time
+        if elapsed > timeout_seconds:
+            msg = f"⏰ Meeting TIMEOUT ({timeout_seconds}s) — saving transcript and leaving"
+            print(msg); await push_log(msg)
+
+            # Save any buffered transcripts
+            if _transcript_buffer:
+                full_text = "\n".join(_transcript_buffer)
+                await insert_transcript(interview_id, "candidate", full_text)
+                msg = f"✅ Saved final transcript ({len(_transcript_buffer)} utterances)"
+                print(msg); await push_log(msg)
+
+            # Update status to abandoned so UI knows meeting ended
+            try:
+                db = mongo_handler.get_db()
+                if db:
+                    await db.interviews.update_one(
+                        {"interview_id": interview_id},
+                        {"$set": {"status": "abandoned", "ended_at": datetime.utcnow()}}
+                    )
+                    msg = "✅ Updated status=abandoned in MongoDB (timeout)"
+                    print(msg); await push_log(msg)
+            except Exception as e:
+                msg = f"❌ Failed to update status: {e}"
+                print(msg); await push_log(msg)
+
+            # Force leave via Playwright
+            try:
+                for sel in ['button[aria-label="Leave call"]', 'button[aria-label*="Leave" i]']:
+                    btn = page.locator(sel)
+                    if await btn.count() > 0 and await btn.first.is_visible():
+                        await btn.first.click()
+                        await page.wait_for_timeout(500)
+                        msg = "✅ Left meeting via Leave button (timeout)"
+                        print(msg); await push_log(msg)
+                        break
+                await page.goto("about:blank", timeout=3000)
+            except Exception as e:
+                msg = f"⚠️  Force leave error: {e}"
+                print(msg); await push_log(msg)
+            return
+
         try:
             db = mongo_handler.get_db()
             if db is None:
@@ -42,91 +145,57 @@ async def _watch_for_leave(interview_id: str, page) -> None:
                 {"interview_id": interview_id},
                 projection={"status": 1}
             )
-            if interview and interview.get("status") in ("abandoned", "completed"):
-                msg = f"Interview {interview_id} ended — leaving meeting"
+            
+            current_status = interview.get("status") if interview else None
+            
+            # Log status changes
+            if current_status != last_status_check:
+                msg = f"📊 Status check: {current_status} (was: {last_status_check})"
+                print(msg); await push_log(msg)
+                last_status_check = current_status
+            
+            if interview and current_status in ("abandoned", "completed"):
+                msg = f"🚨 Interview ENDED (status={current_status}) — saving transcript and leaving IMMEDIATELY"
                 print(msg); await push_log(msg)
 
-                for sel in [
-                    'button[aria-label="Leave call"]',
-                    'button[aria-label*="Leave" i]',
-                ]:
-                    try:
+                # Save any buffered transcripts
+                if _transcript_buffer:
+                    full_text = "\n".join(_transcript_buffer)
+                    await insert_transcript(interview_id, "candidate", full_text)
+                    msg = f"✅ Saved final transcript ({len(_transcript_buffer)} utterances)"
+                    print(msg); await push_log(msg)
+
+                # CRITICAL: Ensure status is set (in case UI set it but bot left before seeing it)
+                try:
+                    await db.interviews.update_one(
+                        {"interview_id": interview_id},
+                        {"$set": {"ended_at": datetime.utcnow()}}
+                    )
+                    msg = "✅ Confirmed status update in MongoDB"
+                    print(msg); await push_log(msg)
+                except Exception as e:
+                    msg = f"⚠️  Status update error: {e}"
+                    print(msg); await push_log(msg)
+
+                # Force leave via Playwright IMMEDIATELY
+                try:
+                    for sel in ['button[aria-label="Leave call"]', 'button[aria-label*="Leave" i]']:
                         btn = page.locator(sel)
                         if await btn.count() > 0 and await btn.first.is_visible():
                             await btn.first.click()
-                            await page.wait_for_timeout(1000)
+                            await page.wait_for_timeout(500)
+                            msg = "✅ Left meeting via Leave button (UI triggered)"
+                            print(msg); await push_log(msg)
                             break
-                    except Exception:
-                        pass
-
-                await page.goto("about:blank", timeout=5000)
-                return
-        except Exception:
-            pass
-
-
-async def _ensure_mic_on(page) -> None:
-    """
-    Ensure Google Meet's microphone is UNMUTED.
-
-    Meet often defaults new joiners to mic-off.  If the mic is off, Chrome's
-    WebRTC track has enabled=false → TTS audio never reaches participants.
-    We click "Turn on microphone" (or equivalent) if it is visible.
-    """
-    mic_off_selectors = [
-        'button[aria-label="Turn on microphone"]',
-        'button[aria-label="Unmute microphone"]',
-        'button[aria-label*="microphone" i][aria-pressed="true"]',
-        'button[data-tooltip*="Turn on microphone" i]',
-    ]
-    for attempt in range(4):
-        for sel in mic_off_selectors:
-            try:
-                btn = page.locator(sel)
-                if await btn.count() > 0 and await btn.first.is_visible():
-                    await btn.first.click()
-                    await page.wait_for_timeout(500)
-                    msg = f"   ✅ Microphone unmuted (clicked: {sel} attempt {attempt+1})"
+                    await page.goto("about:blank", timeout=3000)
+                except Exception as e:
+                    msg = f"⚠️  Leave error: {e}"
                     print(msg); await push_log(msg)
-                    return
-            except Exception:
-                pass
-        await page.wait_for_timeout(500)
-    msg = "   ℹ️  Microphone already on or mute button not found"
-    print(msg); await push_log(msg)
-
-
-async def _disable_camera(page) -> None:
-    """
-    Turn off the camera ONLY — microphone must stay ON.
-
-    The bot's mic track in Meet carries TTS audio (virtual_mic_source → WebRTC).
-    Muting Chrome's mic would silence the agent's voice in the meeting.
-    """
-    cam_selectors = [
-        'button[aria-label="Turn off camera"]',
-        'button[aria-label*="camera" i][aria-pressed="false"]',
-        'button[aria-label*="Stop video" i]',
-    ]
-
-    async def _click_first_visible(selectors: list, label: str) -> None:
-        for attempt in range(5):
-            for sel in selectors:
-                try:
-                    btn = page.locator(sel)
-                    if await btn.count() > 0 and await btn.first.is_visible():
-                        await btn.first.click()
-                        await page.wait_for_timeout(400)
-                        msg = f"   ✅ {label} disabled (attempt {attempt + 1})"
-                        print(msg); await push_log(msg)
-                        return
-                except Exception:
-                    pass
-            await page.wait_for_timeout(500)
-        msg = f"   ℹ️  {label} already off or control not found"
-        print(msg); await push_log(msg)
-
-    await _click_first_visible(cam_selectors, "Camera")
+                return
+        except Exception as e:
+            msg = f"⚠️  Status check error: {e}"
+            print(msg); await push_log(msg)
+            pass
 
 
 async def join_meeting_and_transcribe(
@@ -137,34 +206,30 @@ async def join_meeting_and_transcribe(
     interview_id: str = None,
 ) -> None:
     """
-    Join a Google Meet as guest and scrape captions into MongoDB.
-
+    Join Google Meet as guest and transcribe via Web Speech API (BATCH mode).
+    
     Flow:
-        1. Launch Chromium with automation-friendly flags
+        1. Launch Chromium
         2. Navigate to meeting URL
-        3. Enter guest name — bot appears as "<name> (AI)" so caption filter works
-        4. Pre-join: disable mic + camera
-        5. Click 'Join' / 'Ask to join'
-        6. Wait for host to admit (up to 10 min)
-        7. Post-admit: ensure mic ON (for TTS), confirm camera OFF
-        8. Set bot_status=admitted → triggers Main-Agent to insert greeting
-        9. Start caption scraper + leave watcher concurrently
-        10. On exit: flush remaining buffers, mark interview abandoned if needed
+        3. Enter guest name
+        4. Pre-join: disable camera, ensure mic ON
+        5. Click 'Join'
+        6. Wait for host to admit
+        7. Inject Web Speech API
+        8. Capture ALL speech during meeting (buffer locally)
+        9. When meeting ends: insert ONE final transcript
     """
-    import tempfile
-    import shutil
-
+    global _transcript_buffer
+    _transcript_buffer = []  # Reset buffer
+    
     temp_dir = tempfile.mkdtemp(prefix="meet_bot_")
     session_id = interview_id or datetime.now().strftime("%Y%m%d_%H%M%S")
     name = email.split("@")[0]
 
-    msg = f"🤖 Bot: {name} (AI)  session={session_id}"
+    msg = f"🤖 Bot: {name}  [WEB SPEECH API BATCH MODE]  session={session_id}"
     print(msg); await push_log(msg)
 
-    # Pre-grant microphone permission for meet.google.com in Chrome's profile.
-    # This avoids the Web Speech API 'not-allowed' error that occurs even with
-    # --use-fake-ui-for-media-stream when using a fresh persistent context.
-    import json as _json
+    # Pre-grant microphone permission
     _prefs_dir = Path(temp_dir) / "Default"
     _prefs_dir.mkdir(parents=True, exist_ok=True)
     _prefs = {
@@ -181,9 +246,8 @@ async def join_meeting_and_transcribe(
             }
         }
     }
-    (_prefs_dir / "Preferences").write_text(_json.dumps(_prefs))
+    (_prefs_dir / "Preferences").write_text(str(_prefs).replace("'", '"'))
 
-    transcript_lines: list[str] = []
     mongo_connected = await connect_to_mongo()
     if not mongo_connected:
         msg = "⚠️  Continuing without MongoDB (local transcripts only)"
@@ -197,50 +261,129 @@ async def join_meeting_and_transcribe(
             ctx = await p.chromium.launch_persistent_context(
                 user_data_dir=temp_dir,
                 headless=headless,
-                channel="chrome",        # use system Google Chrome (present in base image)
+                channel="chrome",
                 args=[
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
                     "--autoplay-policy=no-user-gesture-required",
-                    "--use-fake-ui-for-media-stream",           # auto-grant mic/cam without popup
-                    "--allow-running-insecure-content",         # allow http:// fetch from https:// page (backend POST)
-                    "--disable-features=BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights",  # backend is private IP
+                    "--use-fake-ui-for-media-stream",
+                    "--allow-running-insecure-content",
+                    "--disable-features=BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights",
                     "--disable-blink-features=AutomationControlled",
                     "--disable-infobars",
                     "--window-position=0,0",
-                    # Force audio through PulseAudio
                     "--disable-features=AudioServiceSandbox,AudioServiceOutOfProcess",
                     "--alsa-output-device=pulse",
                     "--alsa-input-device=pulse",
-                    "--enable-speech-dispatcher",
                 ],
                 accept_downloads=False,
                 ignore_default_args=["--enable-automation"],
                 viewport={"width": 1280, "height": 720},
             )
 
-            # Grant microphone permission so Web Speech API is not blocked
             await ctx.grant_permissions(["microphone"], origin="https://meet.google.com")
 
             page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
-            # ── Inject init script: block devicechange before Meet JS runs ───
-            # Google Meet listens to navigator.mediaDevices 'devicechange' and calls
-            # replaceTrack() when the PulseAudio default source changes.
-            # When we later call `pactl set-default-source BotMic` (for STT), Chrome
-            # fires devicechange in all pages → Meet renegotiates → moves its outgoing
-            # WebRTC mic track from virtual_mic_source (TTS) to BotMic → TTS silent.
-            # Blocking devicechange registration here prevents that renegotiation while
-            # still allowing Chrome's SpeechRecognition audio service (separate process)
-            # to honour the pactl default switch and capture BotMic.
+            # ── Console event handler — capture Web Speech API transcripts ─────
+            # REAL-TIME MODE: Buffer during speech, save after silence
+            # Filter: Ignore bot's own greeting (prevents echo loop)
+            GREETING_PHRASES = [
+                "hello welcome to your interview",
+                "could you please start by introducing yourself",
+                "hello welcome",
+                "start by introducing",
+                "please start by introducing",
+                "welcome to your interview",
+                "introducing yourself",
+                "could you please type",  # Variation seen in logs
+                "hello welcome to your interview could you please",
+            ]
+            
+            # Real-time buffering state
+            _speech_buffer = []
+            _silence_timer = None
+            SILENCE_SECONDS = 2.0  # Save after 2 seconds of silence
+            
+            async def _save_utterance():
+                """Save buffered utterance to DB after silence."""
+                nonlocal _speech_buffer, _silence_timer
+                if _speech_buffer:
+                    full_text = " ".join(_speech_buffer)
+                    _speech_buffer = []
+                    if full_text.strip():
+                        await insert_transcript(interview_id, "candidate", full_text)
+                        msg = f"💬 Saved to DB: {full_text[:60]}..."
+                        print(msg); await push_log(msg)
+                _silence_timer = None
+            
+            async def _handle_console(msg):
+                nonlocal _speech_buffer, _silence_timer
+                try:
+                    text = msg.text
+
+                    # Capture TRANSCRIPT_EVENT from Web Speech API
+                    if "TRANSCRIPT_EVENT:" in text:
+                        candidate_text = text.split("TRANSCRIPT_EVENT:", 1)[1].strip()
+                        if candidate_text:
+                            # Debug: Log EVERYTHING captured with full text
+                            msg = f"🎤 [STT RAW] Captured: \"{candidate_text}\""
+                            print(msg); await push_log(msg)
+
+                            # Filter out bot's own greeting (prevents echo loop)
+                            text_lower = candidate_text.lower()
+                            
+                            # Check each phrase
+                            is_greeting = False
+                            matched_phrase = None
+                            for phrase in GREETING_PHRASES:
+                                if phrase in text_lower:
+                                    is_greeting = True
+                                    matched_phrase = phrase
+                                    break
+
+                            if is_greeting:
+                                msg = f"🔇 [FILTERED] Greeting detected (matched '{matched_phrase}')"
+                                print(msg); await push_log(msg)
+                                return
+                            
+                            msg = f"✅ [ACCEPTED] Candidate speech: \"{candidate_text[:100]}...\""
+                            print(msg); await push_log(msg)
+
+                            # Buffer the utterance
+                            _speech_buffer.append(candidate_text)
+                            
+                            # Cancel existing silence timer
+                            if _silence_timer and not _silence_timer.done():
+                                _silence_timer.cancel()
+                            
+                            # Start new silence timer (save after 2s of silence)
+                            _silence_timer = asyncio.create_task(asyncio.sleep(SILENCE_SECONDS))
+                            await _silence_timer
+                            await _save_utterance()
+                    
+                    # Log other STT events for debugging
+                    elif text.startswith('STT_') or '[STT]' in text or '[BOT]' in text:
+                        # Only log important events
+                        if "error" in text.lower() or "active" in text.lower() or "capture" in text.lower():
+                            msg = f"🎤 {text[:200]}"
+                            print(msg); await push_log(msg)
+                        
+                except Exception as e:
+                    print(f"Console handler error: {e}")
+            
+            page.on('console', _handle_console)
+            page.on('pageerror', lambda err: print(f"[PAGE ERROR] {err}"))
+
+            # ── Inject init script: block devicechange ───
             await page.add_init_script("""
 (function blockDeviceChange() {
     var _origAdd = EventTarget.prototype.addEventListener;
     EventTarget.prototype.addEventListener = function(type, listener, options) {
         if (this === navigator.mediaDevices && type === 'devicechange') {
-            console.log('[BOT-INIT] devicechange listener BLOCKED (TTS routing protected)');
+            console.log('[BOT-INIT] devicechange listener BLOCKED');
             return;
         }
         return _origAdd.call(this, type, listener, options);
@@ -252,72 +395,45 @@ async def join_meeting_and_transcribe(
             configurable: true
         });
     } catch(e) {}
-    console.log('[BOT-INIT] Audio device-change protection active — Meet WebRTC will stay on virtual_mic_source');
+    console.log('[BOT-INIT] Audio device-change protection active');
 })();
 """)
-            await push_log("✅ [INIT] devicechange protection injected (Meet WebRTC pinned to virtual_mic_source)")
+            await push_log("✅ [INIT] devicechange protection injected")
 
-            # ── Navigate ───────────────────────────────────────────
+            # Navigate to meeting
             msg = f"🌐 Navigating → {url}"
             print(msg); await push_log(msg)
-            nav_ok = False
-            for attempt in range(1, 4):
-                try:
-                    await page.goto(url, timeout=60000, wait_until="domcontentloaded")
-                    nav_ok = True
-                    break
-                except Exception as e:
-                    msg = f"Navigation attempt {attempt}/3 failed: {e}"
-                    print(msg); await push_log(msg)
-                    if attempt < 3:
-                        await page.wait_for_timeout(3000)
-            if not nav_ok:
-                msg = "Navigation failed after 3 attempts — aborting"
+            try:
+                await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+            except Exception as e:
+                msg = f"❌ Navigation failed: {e}"
                 print(msg); await push_log(msg)
-                await _abort("navigation failed")
                 await ctx.close()
                 return
 
             await page.wait_for_timeout(5000)
 
-            # ── Enter guest name ───────────────────────────────────
+            # Enter guest name
             for selector in [
                 "input[placeholder='Your name']",
                 "input[aria-label='Your name']",
-                "input[type='text']",
             ]:
                 try:
                     if await page.locator(selector).count() > 0:
                         await page.locator(selector).first.fill(f"{name} (AI)")
                         await page.wait_for_timeout(1000)
-                        msg = "Name entered"
+                        msg = "✅ Guest name entered"
                         print(msg); await push_log(msg)
                         break
                 except Exception:
                     pass
 
-            # NOTE: Microphone is intentionally left ON.
-            # TTS plays audio to PulseAudio virtual_mic (null-sink).
-            # Chrome reads from virtual_mic_source (the monitor) as its mic input.
-            # Muting Chrome's mic would silence the agent's voice in the meeting.
-
-            # Pre-join: turn off camera
-            try:
-                for cam_sel in [
-                    'button[aria-label="Turn off camera"]',
-                    'button[aria-label*="camera" i][aria-pressed="false"]',
-                    'button[aria-label*="Stop video" i]',
-                ]:
-                    cam_btn = page.locator(cam_sel)
-                    if await cam_btn.count() > 0 and await cam_btn.first.is_visible():
-                        await cam_btn.first.click()
-                        await page.wait_for_timeout(500)
-                        break
-            except Exception:
-                pass
+            # Pre-join: ensure mic ON + disable camera
+            await _ensure_mic_on(page)
+            await _disable_camera(page)
 
             # Click join button
-            msg = "Joining meeting..."
+            msg = "🔍 Clicking join button..."
             print(msg); await push_log(msg)
             joined = False
             for _ in range(15):
@@ -338,14 +454,13 @@ async def join_meeting_and_transcribe(
                 await page.wait_for_timeout(1000)
 
             if not joined:
-                msg = "No join button found — aborting"
+                msg = "❌ No join button found — aborting"
                 print(msg); await push_log(msg)
-                await _abort("no join button")
                 await ctx.close()
                 return
 
             # Wait for admittance
-            msg = "Waiting for host to admit..."
+            msg = "⏳ Waiting for host to admit (up to 10 min)..."
             print(msg); await push_log(msg)
             admitted = False
             for _ in range(600):
@@ -356,102 +471,78 @@ async def join_meeting_and_transcribe(
                         break
                     body = await page.evaluate("() => document.body.innerText.toLowerCase()")
                     if any(x in body for x in ["not found", "has ended", "denied"]):
-                        msg = "Denied or meeting ended during wait"
+                        msg = "❌ Denied or meeting ended during wait"
                         print(msg); await push_log(msg)
-                        await _abort("denied during wait")
                         await ctx.close()
                         return
                 except Exception:
                     pass
 
             if not admitted:
-                msg = "Not admitted within 10 minutes — aborting"
+                msg = "❌ Not admitted within 10 minutes — aborting"
                 print(msg); await push_log(msg)
-                await _abort("10 min timeout")
                 await ctx.close()
                 return
 
-            msg = "Admitted to meeting!"
+            msg = "✅ Admitted to meeting!"
             print(msg); await push_log(msg)
 
-            # Post-admit: ensure mic ON (for TTS), confirm camera OFF
-            await _ensure_mic_on(page)
-            await _disable_camera(page)
-
-            # ── Signal interview-agent to send greeting ────────────
-            # _watch_new_interviews in main.py watches for this update.
-            # Without it the greeting NEVER fires because the watcher
-            # sits on "operationType=update, bot_status=admitted" forever.
+            # Signal interview-agent to send greeting (after proper delay)
             try:
                 from motor.motor_asyncio import AsyncIOMotorClient as _MotorClient
                 _int_uri = os.getenv("MONGODB_URI", "mongodb://mongodb:27017/?replicaSet=rs0")
                 _int_db  = os.getenv("MONGODB_DB", "interviews")
                 _ic = _MotorClient(_int_uri, serverSelectionTimeoutMS=5000)
+                
+                # Wait 3 seconds for bot to fully join meeting audio
+                msg = "⏳ Waiting 3 seconds before greeting..."
+                print(msg); await push_log(msg)
+                await page.wait_for_timeout(3000)
+                
                 await _ic[_int_db]["interviews"].update_one(
                     {"interview_id": interview_id},
                     {"$set": {"bot_status": "admitted"}},
                 )
                 _ic.close()
-                await push_log(f"✅ [BOT] bot_status=admitted → greeting will trigger")
+                await push_log(f"✅ bot_status=admitted → greeting will trigger")
             except Exception as _dbe:
-                await push_log(f"⚠️  [BOT] Failed to set bot_status: {_dbe}")
+                await push_log(f"⚠️  Failed to set bot_status: {_dbe}")
 
-            await page.wait_for_timeout(1500)
+            # Wait additional 2 seconds for audio to stabilize
+            await page.wait_for_timeout(2000)
 
-            # Run caption scraper and leave watcher concurrently.
-            # Whichever finishes first (meeting ends or leave signal) cancels the other.
-            scrape_task = asyncio.create_task(
-                scrape_meeting_captions(page, session_id, on_caption, _on_speech_start)
-            )
+            # Inject Web Speech API
+            msg = "🎤 Injecting Web Speech API for BATCH transcription..."
+            print(msg); await push_log(msg)
+            
+            await inject_speech_recognition(page, session_id)
+            
+            msg = "✅ Web Speech API active — capturing speech (will save at end)"
+            print(msg); await push_log(msg)
+
+            # Run meeting monitor and leave watcher concurrently
             leave_task = asyncio.create_task(
                 _watch_for_leave(interview_id, page)
             )
 
-            done, pending = await asyncio.wait(
-                [scrape_task, leave_task],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for t in pending:
-                t.cancel()
-                try:
-                    await asyncio.wait_for(asyncio.shield(t), timeout=2.0)
-                except (asyncio.CancelledError, asyncio.TimeoutError):
-                    pass
+            # Wait for meeting to end
+            try:
+                await leave_task
+            except asyncio.CancelledError:
+                pass
 
-            msg = "Meeting ended — caption scraping complete"
+            msg = "Meeting ended — Web Speech API transcription complete"
             print(msg); await push_log(msg)
 
-            # ── Final flush ───────────────────────────────────────────────
-            # The meeting ended while some utterances may still be buffered
-            # (timer not fired yet). Cancel pending timers and save immediately.
-            for speaker, buf in _utterance_buffers.items():
-                if buf["timer"] and not buf["timer"].done():
-                    buf["timer"].cancel()
-                remaining = " ".join(buf["parts"]).strip()
-                if remaining and mongo_connected:
-                    await insert_transcript(interview_id, "candidate", remaining)
-                    msg = f"Final flush [{speaker}]: {remaining[:80]}"
-                    print(msg); await push_log(msg)
-
-            # ── Mark interview as abandoned if still in_progress ──────────
-            # Covers the case where the bot was kicked / meeting ended
-            # externally without going through the UI's Leave button.
-            db = mongo_handler.get_db()
-            if db is not None:
-                current = await db.interviews.find_one(
-                    {"interview_id": interview_id},
-                    projection={"status": 1}
-                )
-                if current and current.get("status") == "in_progress":
-                    await db.interviews.update_one(
-                        {"interview_id": interview_id},
-                        {"$set": {"status": "abandoned", "ended_at": datetime.utcnow()}}
-                    )
-                    msg = "Interview marked abandoned — bot left meeting"
-                    print(msg); await push_log(msg)
+            # Final cleanup - save batch transcript
+            if mongo_connected and _transcript_buffer:
+                full_text = "\n".join(_transcript_buffer)
+                await insert_transcript(interview_id, "candidate", full_text)
+                msg = f"✅ Final transcript saved: {len(_transcript_buffer)} utterances, {len(full_text)} chars"
+                print(msg); await push_log(msg)
 
         except Exception as e:
-            msg = f"Bot error: {e}"
+            msg = f"❌ Bot error: {e}"
             print(msg); await push_log(msg)
         finally:
             try:
@@ -468,451 +559,62 @@ async def join_meeting_and_transcribe(
                 pass
 
 
-# ── Utterance buffer ──────────────────────────────────────────────────
-# The caption scraper fires on_caption once per *stabilized chunk*
-# (~1.5 s of DOM silence), not once per full turn. A candidate
-# saying three sentences would produce three DB inserts, causing
-# Main-Agent to respond mid-thought three times.
-#
-# Fix: buffer chunks per speaker. Start a 4-second silence timer
-# on each new chunk. If more text arrives, cancel and restart the
-# timer. When the timer actually fires (real silence), flush the
-# entire accumulated turn as ONE DB insert.
-# ─────────────────────────────────────────────────────────────────────
-UTTERANCE_SILENCE_SEC = 0.8   # wait for long/mid responses (was 1.2)
-SHORT_UTTERANCE_SEC   = 0.4   # wait for short responses ≤ 8 words (was 0.7)
-SHORT_UTTERANCE_WORDS = 8     # 1.0 s > DOM chunk interval (~0.3-0.5 s)
-                              # so rapid chunks still accumulate before flush
-MAX_UTTERANCE_SEC     = 30.0  # force-flush after 30 s even if candidate
-                              # keeps speaking — prevents 60-90 s buffering
-
-# Python-side backup for UI noise strings that may slip through the
-# JS filter when Google Meet splits them across DOM nodes.
-_PYTHON_NOISE = [
-    "live captions have been turned",
-    "captions have been turned",
-    "captions are on",
-    "captions are off",
-    "you left the meeting",
-    "meeting ended",
-    "has joined the meeting",
-    "has left the meeting",
-    "joined the meeting",
-    "waiting to be admitted",
-    "brought you into the call",
-    "you've been admitted",
-    "turn on captions",
-    "turn off captions",
-]
-
-# { speaker_name: {"parts": [str], "timer": asyncio.Task | None,
-#                  "first_chunk_time": float | None,
-#                  "interrupt_sent": bool} }
-_utterance_buffers: dict = {}
-
-# Track which speakers already triggered an interrupt this utterance
-# to prevent duplicate tts_interrupt signals from both speech_start
-# and on_caption paths.
-_speech_start_interrupt_sent: set[str] = set()
-
-# Interrupt validation state: {interview_id: {"started_at": float, "initial_text": str, "validated": bool}}
-_interrupt_validation: dict = {}
-
-# Configuration imported from caption_scraper
-from caption_scraper import INTERRUPT_VALIDATE_DELAY, INTERRUPT_MIN_TEXT_GROWTH
-import time
-
-
-async def _on_speech_start(event):
-    """
-    Fired by caption_scraper immediately when a speaker's DOM text changes —
-    before the stabilization window. Validates interrupt before sending to prevent false positives.
-
-    Validation logic:
-    1. Wait INTERRUPT_VALIDATE_DELAY (1.2s) to confirm candidate is STILL speaking
-    2. Check if text grew by at least INTERRUPT_MIN_TEXT_GROWTH (3 chars)
-    3. Only then send interrupt — prevents false alarms from stale DOM or echo
-
-    Debounced per-utterance via _speech_start_interrupt_sent so that each
-    growing word-by-word DOM update does not re-send the interrupt.
-    """
-    try:
-        speaker = event.get("speaker", "Unknown")
-        text    = event.get("text", "").strip()
-        if "(ai)" in speaker.lower() or speaker.lower() == "you":
-            return
-        # Already sent for this utterance
-        if speaker in _speech_start_interrupt_sent:
-            return
-
-        db = mongo_handler.get_db()
-        if db is None:
-            return
-
-        interview_doc = await db.interviews.find_one(
-            {"interview_id": interview_id},
-            projection={"bot_speaking": 1},
-        )
-
-        bot_speaking = interview_doc and interview_doc.get("bot_speaking") if interview_doc else False
-
-        # Initialize validation state for this interview if not exists
-        if interview_id not in _interrupt_validation:
-            _interrupt_validation[interview_id] = {
-                "started_at": time.monotonic(),
-                "initial_text": text,
-                "validated": False,
-                "last_text": text
-            }
-
-        validation = _interrupt_validation[interview_id]
-        elapsed = time.monotonic() - validation["started_at"]
-        
-        # Track text growth to confirm candidate is actively speaking
-        text_growth = len(text) - len(validation["initial_text"])
-        validation["last_text"] = text
-
-        if bot_speaking:
-            # VALIDATION PHASE: Wait 1.2s and check text growth before sending interrupt
-            if not validation["validated"]:
-                if elapsed < INTERRUPT_VALIDATE_DELAY:
-                    # Still validating — wait for more text to confirm real speech
-                    return
-                elif text_growth < INTERRUPT_MIN_TEXT_GROWTH:
-                    # Text didn't grow enough — likely false alarm (stale DOM or echo)
-                    msg = f"Interrupt validation failed: text growth={text_growth} chars (need {INTERRUPT_MIN_TEXT_GROWTH})"
-                    print(msg); await push_log(msg)
-                    # Clear validation state for next attempt
-                    del _interrupt_validation[interview_id]
-                    return
-                else:
-                    # Validation passed — mark as validated and send interrupt
-                    validation["validated"] = True
-                    msg = f"Interrupt validated after {elapsed:.2f}s (growth={text_growth} chars)"
-                    print(msg); await push_log(msg)
-
-            # Bot IS speaking + validated → this is a real candidate interruption
-            await db.interviews.update_one(
-                {"interview_id": interview_id},
-                {"$set": {"tts_interrupt": True}},
-            )
-            _speech_start_interrupt_sent.add(speaker)
-            # Also mark the utterance buffer so on_caption doesn't re-send
-            if speaker in _utterance_buffers:
-                _utterance_buffers[speaker]["interrupt_sent"] = True
-            msg = f"Early interrupt signal sent — candidate started speaking ({speaker})"
-            print(msg); await push_log(msg)
-            # Clear validation state after sending
-            if interview_id in _interrupt_validation:
-                del _interrupt_validation[interview_id]
-            return
-
-        # Bot NOT speaking → clear validation state (no interrupt needed)
-        if interview_id in _interrupt_validation:
-            del _interrupt_validation[interview_id]
-
-        # Bot NOT speaking → apply echo/stale filters to prevent false interrupts
-
-        # Echo check: the MutationObserver fires ~3 s after TTS starts,
-        # carrying the TTS audio as caption text (attributed to "Unknown"
-        # or even the candidate's name by Google Meet).  If the incoming
-        # text looks like a fragment of recent agent speech, it's an echo
-        # — do NOT send the interrupt.
-        if text:
-            try:
-                db_echo = mongo_handler.get_db()
-                if db_echo is not None:
-                    cutoff = datetime.utcnow() - timedelta(seconds=15)
-                    recent = await db_echo.transcripts.find(
-                        {"interview_id": interview_id, "speaker": "agent",
-                         "timestamp": {"$gte": cutoff}},
-                    ).sort("timestamp", -1).limit(5).to_list(5)
-                    agent_texts = [r.get("text", "") for r in recent]
-                    if _is_echo(text, agent_texts):
-                        msg = f"Echo filter (speech_start): suppressed interrupt [{speaker}]: {text[:80]!r}"
-                        print(msg); await push_log(msg)
-                        return
-            except Exception:
-                pass  # If check fails, proceed with interrupt
-
-        # Stale DOM check: Google Meet keeps the last caption text in the
-        # DOM even after the speaker stops. Any unrelated DOM mutation
-        # (e.g. a new participant notification) re-triggers MutationObserver
-        # with that stale text — causing a false interrupt right after TTS
-        # arms. Suppress if the text is already committed as a candidate
-        # transcript (meaning it's old, not new speech).
-        if text:
-            try:
-                db_stale = mongo_handler.get_db()
-                if db_stale is not None:
-                    last_candidate = await db_stale.transcripts.find(
-                        {"interview_id": interview_id, "speaker": "candidate"},
-                    ).sort("timestamp", -1).limit(1).to_list(1)
-                    if last_candidate:
-                        import re as _re
-                        def _norm(s):
-                            return " ".join(_re.sub(r'[^\w\s]', '', s.lower()).split())
-                        n_text = _norm(text)
-                        n_committed = _norm(last_candidate[0].get("text", ""))
-                        if n_text and n_committed and (
-                            n_text in n_committed or n_committed in n_text
-                        ):
-                            msg = f"Stale DOM filter (speech_start): suppressed interrupt [{speaker}]: {text[:80]!r}"
-                            print(msg); await push_log(msg)
-                            return
-            except Exception:
-                pass  # If check fails, proceed with interrupt
-
-    except Exception as e:
-        print(f"on_speech_start error (non-fatal): {e}")
-
-
-async def on_caption(doc):
-    try:
-        speaker = doc.get("speaker", "Unknown")
-        text = doc.get("text", "").strip()
-
-        # Skip the bot's own TTS audio — Chrome labels it as
-        # "(AI)" display name, or as "You" (local-user perspective).
-        if "(ai)" in speaker.lower() or speaker.lower() == "you" or not text:
-            return
-
-        # ── NOISE FILTERS (run BEFORE speaker normalization) ──────
-        # These must run first to avoid polluting logs with "candidate: AM bks-ipsc-vak"
-
-        # Skip Google Meet meeting-code artefacts FIRST.
-        # "AM abc-def-ghi abc-def-ghi" — 2-3 uppercase prefix + hyphenated code.
-        if re.match(r'^[A-Z]{2,3}\s+[a-z]+-[a-z]+-[a-z]+', text):
-            msg = f"Noise filter: meet-code skipped: {text!r}"
-            print(msg); await push_log(msg)
-            return
-
-        # ── Python-side noise backup ──────────────────────────────
-        # The JS filter can miss strings when Google Meet splits them across DOM nodes.
-        text_lc = text.lower()
-        if any(n in text_lc for n in _PYTHON_NOISE):
-            msg = f"Noise filter (py): skipped: {text!r}"
-            print(msg); await push_log(msg)
-            return
-
-        # Skip very short captures that are likely background noise
-        # (single punctuation bursts, ambient sound artefacts).
-        # Allow single-word genuine answers like "yes", "understood".
-        if len(text) <= 2 or (len(text.split()) == 1 and not text[0].isalpha()):
-            msg = f"Noise filter: skipped: {text!r}"
-            print(msg); await push_log(msg)
-            return
-
-        # ── Normalize speaker label ───────────────────────────────
-        # Google Meet's speaker detection is unreliable (often "Unknown").
-        # We treat ALL non-bot speech as "candidate" — the echo filter
-        # uses bot_speaking state + text similarity to filter bot echoes.
-        speaker = "candidate"
-
-        # ── Early echo check (all speakers, first chunk only) ─────
-        # Run BEFORE buffering on the first chunk of each new utterance.
-        # Catches two cases:
-        #   - Unknown speaker: TTS audio misattributed before Meet
-        #     assigns a name.
-        #   - Named speaker: echo arrives 2-4s AFTER bot stops speaking
-        #     (Google Meet STT has a processing delay), so bot_speaking
-        #     is already False and the echo gate below won't fire.
-        # One DB query per utterance start — not per chunk.
-        _buf_for_early = _utterance_buffers.get(speaker, {})
-        if not _buf_for_early.get("parts"):
-            try:
-                db = mongo_handler.get_db()
-                if db is not None:
-                    cutoff = datetime.utcnow() - timedelta(seconds=15)
-                    recent = await db.transcripts.find(
-                        {"interview_id": interview_id, "speaker": "agent",
-                         "timestamp": {"$gte": cutoff}},
-                    ).sort("timestamp", -1).limit(10).to_list(10)
-                    agent_texts = [r.get("text", "") for r in recent]
-                    if _is_echo(text, agent_texts):
-                        msg = f"Echo filter (early): discarded [{speaker}]: {text[:80]!r}"
-                        print(msg); await push_log(msg)
-                        return
-            except Exception as ue:
-                print(f"Early echo check error (non-fatal): {ue}")
-
-        # ── Interruption signal ───────────────────────────────────
-        # Send tts_interrupt=True if bot is currently speaking.
-        # This stops TTS playback immediately so candidate can speak.
-        buf_peek = _utterance_buffers.get(speaker, {})
-        already_sent = (buf_peek.get("interrupt_sent")
-                        or speaker in _speech_start_interrupt_sent)
-        if not already_sent:
-            try:
-                db = mongo_handler.get_db()
-                if db is not None:
-                    interview_doc = await db.interviews.find_one(
-                        {"interview_id": interview_id},
-                        projection={"bot_speaking": 1},
-                    )
-                    if interview_doc and interview_doc.get("bot_speaking"):
-                        await db.interviews.update_one(
-                            {"interview_id": interview_id},
-                            {"$set": {"tts_interrupt": True}},
-                        )
-                        msg = f"Interrupt signal sent (on_caption) — bot was speaking, candidate started"
-                        print(msg); await push_log(msg)
-                        # Mark both dedup guards so neither path re-sends
-                        _speech_start_interrupt_sent.add(speaker)
-                        if speaker in _utterance_buffers:
-                            _utterance_buffers[speaker]["interrupt_sent"] = True
-            except Exception as interrupt_err:
-                print(f"Interrupt signal error (non-fatal): {interrupt_err}")
-
-        # NOTE: Echo filtering is done in _flush_speaker() by comparing
-        # text similarity with recent agent transcripts. We do NOT discard
-        # here based on bot_speaking alone — that would lose candidate
-        # speech during legitimate interruptions.
-
-        # Initialise buffer slot for first caption from this speaker
-        if speaker not in _utterance_buffers:
-            _utterance_buffers[speaker] = {"parts": [], "timer": None, "first_chunk_time": None, "interrupt_sent": False}
-
-        buf = _utterance_buffers[speaker]
-
-        # Record when this utterance started (first chunk only)
-        if not buf["parts"]:
-            buf["first_chunk_time"] = asyncio.get_event_loop().time()
-
-        buf["parts"].append(text)
-
-        preview = text[:50] + ("..." if len(text) > 50 else "")
-        msg = f"Buffering [{speaker}]: {preview}"
-        print(msg); await push_log(msg)
-
-        # Force-flush if the candidate has been speaking for MAX_UTTERANCE_SEC
-        # without a long-enough pause (prevents 60-90 s buffering).
-        elapsed = asyncio.get_event_loop().time() - (buf["first_chunk_time"] or asyncio.get_event_loop().time())
-        if elapsed >= MAX_UTTERANCE_SEC:
-            if buf["timer"] and not buf["timer"].done():
-                buf["timer"].cancel()
-            buf["timer"] = asyncio.create_task(
-                _flush_speaker(speaker, buf, force=True)
-            )
-        else:
-            # Cancel previous silence timer and start a fresh one
-            if buf["timer"] and not buf["timer"].done():
-                buf["timer"].cancel()
-            buf["timer"] = asyncio.create_task(
-                _flush_speaker(speaker, buf)
-            )
-
-    except Exception as e:
-        msg = f"Caption processing error: {e}"
-        print(msg); await push_log(msg)
-
-
-async def _flush_speaker(speaker: str, buf: dict, force: bool = False) -> None:
-    """
-    Flush a speaker's buffered utterance to MongoDB.
-
-    Called by the silence timer after UTTERANCE_SILENCE_SEC of no new chunks.
-    If force=True (MAX_UTTERANCE_SEC reached), flush immediately regardless of timer.
-    """
-    full_text = " ".join(buf["parts"]).strip()
-    if not full_text:
+async def main():
+    """Main entry point — watches interviews.interviews for new meetings."""
+    from motor.motor_asyncio import AsyncIOMotorClient
+    
+    mongo_uri = os.getenv("MONGODB_URI", "mongodb://mongodb:27017/?replicaSet=rs0")
+    db_name = os.getenv("MONGODB_DB", "interviews")
+    bot_email = os.getenv("BOT_EMAIL", "bot@example.com")
+    
+    print(f"[WATCHER] Connecting to MongoDB: {mongo_uri}")
+    client = AsyncIOMotorClient(mongo_uri)
+    
+    # Wait for MongoDB
+    for attempt in range(30):
+        try:
+            await client.admin.command("ping")
+            print("[WATCHER] ✅ MongoDB connected")
+            break
+        except Exception as e:
+            print(f"[WATCHER] Waiting for MongoDB ({attempt + 1}/30): {e}")
+            await asyncio.sleep(3)
+    else:
+        print("[WATCHER] ❌ Could not connect to MongoDB after 90s — exiting")
         return
-
-    # Echo check: compare with recent agent transcripts to filter
-    # out the bot's own TTS audio that Chrome captions as "Unknown"
-    # or even the candidate's name (Google Meet STT echo).
-    # Only run this check if bot_speaking was True recently.
-    db_echo = mongo_handler.get_db()
-    if db_echo is not None:
-        cutoff = datetime.utcnow() - timedelta(seconds=15)
-        recent = await db_echo.transcripts.find(
-            {"interview_id": interview_id, "speaker": "agent",
-             "timestamp": {"$gte": cutoff}},
-        ).sort("timestamp", -1).limit(5).to_list(5)
-        agent_texts = [r.get("text", "") for r in recent]
-        if _is_echo(full_text, agent_texts):
-            msg = f"Echo filter (bot_speaking): skipped [{speaker}]: {full_text[:80]!r}"
-            print(msg); await push_log(msg)
-            buf["parts"] = []
-            return
-
-    # Dedup check: skip if this exact text was saved in the last 60s
-    # (prevents double-saving from DOM + Web Speech API).
-    db_dedup = mongo_handler.get_db()
-    if db_dedup is not None:
-        cutoff = datetime.utcnow() - timedelta(seconds=60)
-        recent = await db_dedup.transcripts.find(
-            {"interview_id": interview_id, "speaker": "candidate",
-             "timestamp": {"$gte": cutoff}},
-        ).sort("timestamp", -1).limit(5).to_list(5)
-        import re as _re
-        def _norm(s):
-            return " ".join(_re.sub(r'[^\w\s]', '', s.lower()).split())
-        n_full = _norm(full_text)
-        for r in recent:
-            n_prev = _norm(r.get("text", ""))
-            if n_full and n_prev and (n_full in n_prev or n_prev in n_full):
-                msg = f"Dedup filter: skipped [{speaker}] (duplicate of recent): {full_text[:60]!r}"
-                print(msg); await push_log(msg)
-                buf["parts"] = []
-                return
-
-    # Save to MongoDB
-    if mongo_connected:
-        await insert_transcript(interview_id, "candidate", full_text)
-        preview = full_text[:80] + ("..." if len(full_text) > 80 else "")
-        msg = f"Saved turn [{speaker}]: {preview}"
-        print(msg); await push_log(msg)
+    
+    db = client[db_name]
+    collection = db["interviews"]
+    
+    pipeline = [{"$match": {"operationType": "insert"}}]
+    
+    print(f"[WATCHER] 👀 Watching interviews.interviews for new sessions...")
+    print(f"[WATCHER] Bot email: {bot_email}")
+    
+    async with collection.watch(pipeline, full_document="updateLookup") as stream:
+        async for change in stream:
+            full_doc = change.get("fullDocument") or {}
+            status = full_doc.get("status", "")
+            
+            if status != "in_progress":
+                continue
+            
+            interview_id = full_doc.get("interview_id", "unknown")
+            meeting_url = full_doc.get("meeting_url", "")
+            
+            if not meeting_url:
+                print(f"[WATCHER] ⚠️  interview {interview_id} has no meeting_url — skipping")
+                continue
+            
+            print(f"[WATCHER] 🎯 Joining meeting for interview {interview_id}: {meeting_url}")
+            
+            # Dispatch to background task
+            asyncio.create_task(join_meeting_and_transcribe(
+                url=meeting_url,
+                email=bot_email,
+                interview_id=interview_id,
+            ))
 
 
-def _is_echo(text: str, agent_texts: list[str]) -> bool:
-    """
-    Check if `text` looks like an echo of recent agent speech.
-
-    Uses word overlap (Jaccard similarity) to detect phonetic variations
-    that STT may produce (e.g. "Agentic AI" → "a genetic AI").
-
-    Returns True if overlap > 0.85 (configurable threshold).
-    """
-    import re
-    def _words(s):
-        return set(re.sub(r'[^\w\s]', '', s.lower()).split())
-
-    text_words = _words(text)
-    if not text_words:
-        return False
-
-    for agent_text in agent_texts:
-        agent_words = _words(agent_text)
-        if not agent_words:
-            continue
-
-        # Jaccard similarity: |A ∩ B| / |A ∪ B|
-        intersection = len(text_words & agent_words)
-        union = len(text_words | agent_words)
-        if union == 0:
-            continue
-
-        similarity = intersection / union
-        if similarity > 0.85:  # Threshold for echo detection
-            return True
-
-    return False
-
-
-async def _abort(reason: str) -> None:
-    """Mark the interview as abandoned and exit."""
-    db = mongo_handler.get_db()
-    if db is not None:
-        await db.interviews.update_one(
-            {"interview_id": interview_id},
-            {"$set": {
-                "status": "abandoned",
-                "ended_at": datetime.utcnow(),
-                "limits": {"forced_end_reason": reason}
-            }}
-        )
-
-
-# Import os for environment variables
-import os
+if __name__ == "__main__":
+    asyncio.run(main())

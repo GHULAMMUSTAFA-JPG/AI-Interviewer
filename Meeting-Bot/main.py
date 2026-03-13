@@ -43,6 +43,13 @@ async def run_bot(interview: dict) -> None:
     interview_id = str(interview.get("interview_id", interview.get("_id", "unknown")))
     meeting_url = interview.get("meeting_url", "")
 
+    # Ensure URL has https:// prefix
+    if meeting_url and not meeting_url.startswith("http"):
+        meeting_url = "https://" + meeting_url.lstrip("/")
+    
+    # Also strip any trailing slashes
+    meeting_url = meeting_url.rstrip("/")
+
     if not meeting_url:
         msg = f"No meeting_url in interview {interview_id} — skipping"
         print(msg); await push_log(msg)

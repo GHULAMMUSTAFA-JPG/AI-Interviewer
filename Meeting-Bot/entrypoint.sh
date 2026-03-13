@@ -16,28 +16,56 @@ sleep 1
 log "Starting Xvfb :99..."
 Xvfb :99 -screen 0 1280x720x24 -ac +extension GLX +render -noreset -nolisten tcp &
 sleep 2
-log "Xvfb running"
+log "✅ Xvfb running"
 
-# Start PulseAudio (for TTS container)
+# Start PulseAudio as regular daemon (not system mode)
 log "Starting PulseAudio..."
 mkdir -p /var/run/pulse /root/.config/pulse
 chmod 777 /var/run/pulse
 
-pulseaudio --system --daemonize=yes --exit-idle-time=-1 --disallow-exit 2>/dev/null || true
-sleep 2
+# Configure PulseAudio for anonymous connections (TTS container needs this)
+mkdir -p /etc/pulse
+cat > /etc/pulse/default.pa << 'EOF'
+load-module module-native-protocol-unix auth-anonymous=1 socket=/var/run/pulse/native
+load-module module-null-sink sink_name=virtual_mic sink_properties=device.description=VirtualMic
+load-module module-remap-source source_name=virtual_mic_source master=virtual_mic.monitor source_properties=device.description=VirtualMicSource
+set-default-sink virtual_mic
+set-default-source virtual_mic_source
+EOF
 
+# Start PulseAudio
+pulseaudio --daemonize=yes --exit-idle-time=-1 --disallow-exit --use-pid-file=false 2>&1 || log "⚠️  PulseAudio start returned non-zero"
+sleep 3
+
+# Verify PulseAudio is running
 if pactl info &>/dev/null; then
-    log "PulseAudio running"
-    pactl load-module module-null-sink sink_name=virtual_mic sink_properties=device.description=VirtualMic 2>/dev/null && log "virtual_mic created" || true
-    pactl load-module module-remap-source source_name=virtual_mic_source master=virtual_mic.monitor source_properties=device.description=VirtualMicSource 2>/dev/null && log "virtual_mic_source created" || true
-    pactl set-default-sink virtual_mic 2>/dev/null || true
-    pactl set-default-source virtual_mic_source 2>/dev/null || true
-    log "10"
-    pactl list short sinks 2>/dev/null | head -5 || true
-    log "11"
-    pactl list short sources 2>/dev/null | head -5 || true
+    log "✅ PulseAudio running"
+
+    # Show devices for debugging
+    log "Sinks:"
+    pactl list short sinks 2>/dev/null || true
+    log "Sources:"
+    pactl list short sources 2>/dev/null || true
+    
+    # Verify default sink/source
+    log "Default sink:"
+    pactl get-default-sink 2>/dev/null || true
+    log "Default source:"
+    pactl get-default-source 2>/dev/null || true
 else
-    log "PulseAudio failed to start - TTS will handle gracefully"
+    log "❌ PulseAudio NOT running - checking process..."
+    ps aux 2>/dev/null | grep -i pulse || true
+    log "Trying alternative start method..."
+
+    # Alternative: start without config
+    pulseaudio --daemonize=yes --exit-idle-time=-1 2>&1 || true
+    sleep 2
+
+    if pactl info &>/dev/null; then
+        log "✅ PulseAudio started with fallback method"
+    else
+        log "❌ PulseAudio failed completely"
+    fi
 fi
 
 # Chrome audio policy
@@ -60,5 +88,5 @@ ctl.!default { type pulse }
 EOF
 log "✅ ALSA config written"
 
-log "Environment ready - starting Meeting Bot..."
+log "Starting Meeting Bot..."
 exec python3 main.py
