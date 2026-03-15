@@ -61,16 +61,13 @@ _SPEECH_API_JS = r"""
     // short segment while the candidate is still speaking.  Each final
     // would fire TRANSCRIPT_EVENT → Gemini → agent interrupts the candidate.
     //
-    // Fix: Buffer ALL final segments during one speech segment.
-    //      After onspeechend fires, wait SILENCE_MS before emitting.
-    //      If onspeechstart fires again (candidate still talking) → cancel
-    //      the timer and keep buffering.
-    //      After SILENCE_MS of continuous silence → emit accumulated text.
-    // Dynamic silence: ≤10 words → 600ms  |  >20 words → 1200ms  |  else 800ms
-    // Shorter answers flush faster; longer, detailed answers get a full pause.
+    // REAL-TIME FIX: Emit interim results IMMEDIATELY as they come in.
+    // Don't wait for silence. Stream transcripts in real-time.
+    // Only flush final results once to avoid duplicates.
     var __speechBuffer      = '';     // accumulates final text in one turn
-    var __silenceTimer      = null;   // pending setTimeout handle
+    var __silenceTimer      = null;   // NOT USED - real-time now
     var __lastSentText      = '';     // dedup: don't send the same sentence twice
+    var __lastInterimSent   = '';     // track last interim to avoid spam
 
     function _getSilenceMs() {
         var words = __speechBuffer.trim().split(/\s+/).filter(Boolean).length;
@@ -140,8 +137,12 @@ _SPEECH_API_JS = r"""
     const recognition           = new SpeechRecognition();
     recognition.continuous      = true;
     recognition.interimResults  = true;
-    recognition.lang            = 'en-US';
-    recognition.maxAlternatives = 1;
+    
+    // Language configuration - supports multiple languages
+    // Default: en-US, but can be overridden via window.STT_LANGUAGE
+    // Common codes: 'en-US', 'en-GB', 'ur-PK', 'hi-IN', 'es-ES', 'fr-FR'
+    recognition.lang            = window.STT_LANGUAGE || 'en-US';
+    recognition.maxAlternatives = 3;  // Get multiple alternatives for better accuracy
 
     window.__speechRecognition  = recognition;
 
@@ -183,24 +184,34 @@ _SPEECH_API_JS = r"""
 
     recognition.onresult = function(event) {
         var interimText = '';
+        var finalText = '';
 
         for (var i = event.resultIndex; i < event.results.length; i++) {
             var text = event.results[i][0].transcript;
             var conf = event.results[i][0].confidence;
+            
             if (event.results[i].isFinal) {
-                // Accumulate into buffer — do NOT emit yet
-                __speechBuffer += (text + ' ');
-                console.log('[AGENT] Generating response');
-                console.log('💬 [BOT] Buffered final: ' + text.trim());
+                // Accumulate final results
+                finalText += (text + ' ');
+                console.log('[BOT] Final segment: ' + text.trim());
             } else {
+                // INTERIM results - emit IMMEDIATELY for real-time
                 interimText += text;
             }
         }
 
         window.__lastTranscript = interimText || __speechBuffer;
 
+        // EMIT INTERIM IMMEDIATELY (real-time as you speak)
         if (interimText.trim()) {
             console.log('STT_INTERIM:' + interimText.trim());
+        }
+        
+        // Buffer final results and emit once
+        if (finalText.trim()) {
+            __speechBuffer += finalText;
+            console.log('[AGENT] Generating response');
+            console.log('💬 [BOT] Buffered final: ' + finalText.trim());
         }
     };
 

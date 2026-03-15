@@ -86,6 +86,28 @@ services:
     restart: unless-stopped
 
   # ────────────────────────────────────────────────────────────────
+  # Cleanup Service: Automatically cleans up stuck interviews.
+  # Runs every 30 seconds to mark interviews as "abandoned" if:
+  # - Bot heartbeat is stale (> 2 min)
+  # - Interview duration exceeded (> 2 hours)
+  # ────────────────────────────────────────────────────────────────
+  cleanup-service:
+    build:
+      context: ./Cleanup-Service
+      dockerfile: ../docker/cleanup-service.Dockerfile
+    container_name: cleanup-service
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      MONGODB_URI: "mongodb://mongodb:27017/?replicaSet=rs0"
+      MONGODB_DB: "interviews"
+    networks:
+      - interview-net
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────────────
   # TTS: text-to-speech.
   # Watches interviews.transcripts (speaker=agent, audio_url=null).
   # Calls ElevenLabs, plays audio through PulseAudio virtual mic

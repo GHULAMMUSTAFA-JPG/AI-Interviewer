@@ -26,8 +26,12 @@ from mongo_handler import (
     connect_to_mongo,
     disconnect_from_mongo,
     insert_transcript,
+    db,  # Import the global db variable
 )
 from speech_injector import inject_speech_recognition
+
+# STT Language configuration (from .env)
+STT_LANGUAGE = os.getenv("STT_LANGUAGE", "en-US")  # Default: English US
 
 # Store captured transcripts locally during meeting (BATCH mode)
 _transcript_buffer = []
@@ -96,19 +100,11 @@ async def _watch_for_leave(interview_id: str, page) -> None:
         # Check timeout
         elapsed = asyncio.get_event_loop().time() - start_time
         if elapsed > timeout_seconds:
-            msg = f"⏰ Meeting TIMEOUT ({timeout_seconds}s) — saving transcript and leaving"
+            msg = f"⏰ Meeting TIMEOUT ({timeout_seconds}s) — leaving"
             print(msg); await push_log(msg)
-
-            # Save any buffered transcripts
-            if _transcript_buffer:
-                full_text = "\n".join(_transcript_buffer)
-                await insert_transcript(interview_id, "candidate", full_text)
-                msg = f"✅ Saved final transcript ({len(_transcript_buffer)} utterances)"
-                print(msg); await push_log(msg)
 
             # Update status to abandoned so UI knows meeting ended
             try:
-                db = mongo_handler.get_db()
                 if db:
                     await db.interviews.update_one(
                         {"interview_id": interview_id},
@@ -137,7 +133,6 @@ async def _watch_for_leave(interview_id: str, page) -> None:
             return
 
         try:
-            db = mongo_handler.get_db()
             if db is None:
                 continue
 
@@ -155,15 +150,8 @@ async def _watch_for_leave(interview_id: str, page) -> None:
                 last_status_check = current_status
             
             if interview and current_status in ("abandoned", "completed"):
-                msg = f"🚨 Interview ENDED (status={current_status}) — saving transcript and leaving IMMEDIATELY"
+                msg = f"🚨 Interview ENDED (status={current_status}) — leaving IMMEDIATELY"
                 print(msg); await push_log(msg)
-
-                # Save any buffered transcripts
-                if _transcript_buffer:
-                    full_text = "\n".join(_transcript_buffer)
-                    await insert_transcript(interview_id, "candidate", full_text)
-                    msg = f"✅ Saved final transcript ({len(_transcript_buffer)} utterances)"
-                    print(msg); await push_log(msg)
 
                 # CRITICAL: Ensure status is set (in case UI set it but bot left before seeing it)
                 try:
@@ -288,7 +276,8 @@ async def join_meeting_and_transcribe(
             page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
             # ── Console event handler — capture Web Speech API transcripts ─────
-            # REAL-TIME MODE: Buffer during speech, save after silence
+            # JavaScript handles buffering & silence detection (2s)
+            # Python just saves what JavaScript flushes
             # Filter: Ignore bot's own greeting (prevents echo loop)
             GREETING_PHRASES = [
                 "hello welcome to your interview",
@@ -302,34 +291,24 @@ async def join_meeting_and_transcribe(
                 "hello welcome to your interview could you please",
             ]
             
-            # Real-time buffering state
-            _speech_buffer = []
-            _silence_timer = None
-            SILENCE_SECONDS = 2.0  # Save after 2 seconds of silence
-            
-            async def _save_utterance():
-                """Save buffered utterance to DB after silence."""
-                nonlocal _speech_buffer, _silence_timer
-                if _speech_buffer:
-                    full_text = " ".join(_speech_buffer)
-                    _speech_buffer = []
-                    if full_text.strip():
-                        await insert_transcript(interview_id, "candidate", full_text)
-                        msg = f"💬 Saved to DB: {full_text[:60]}..."
-                        print(msg); await push_log(msg)
-                _silence_timer = None
-            
             async def _handle_console(msg):
-                nonlocal _speech_buffer, _silence_timer
                 try:
                     text = msg.text
 
-                    # Capture TRANSCRIPT_EVENT from Web Speech API
+                    # Capture INTERIM results (real-time as you speak)
+                    if "STT_INTERIM:" in text:
+                        interim_text = text.split("STT_INTERIM:", 1)[1].strip()
+                        if interim_text:
+                            msg = f"🎤 [STT INTERIM] {interim_text}"
+                            print(msg); await push_log(msg)
+                        return
+                    
+                    # Capture TRANSCRIPT_EVENT from Web Speech API (final results)
                     if "TRANSCRIPT_EVENT:" in text:
                         candidate_text = text.split("TRANSCRIPT_EVENT:", 1)[1].strip()
                         if candidate_text:
                             # Debug: Log EVERYTHING captured with full text
-                            msg = f"🎤 [STT RAW] Captured: \"{candidate_text}\""
+                            msg = f"🎤 [STT FINAL] Captured: \"{candidate_text}\""
                             print(msg); await push_log(msg)
 
                             # Filter out bot's own greeting (prevents echo loop)
@@ -352,17 +331,10 @@ async def join_meeting_and_transcribe(
                             msg = f"✅ [ACCEPTED] Candidate speech: \"{candidate_text[:100]}...\""
                             print(msg); await push_log(msg)
 
-                            # Buffer the utterance
-                            _speech_buffer.append(candidate_text)
-                            
-                            # Cancel existing silence timer
-                            if _silence_timer and not _silence_timer.done():
-                                _silence_timer.cancel()
-                            
-                            # Start new silence timer (save after 2s of silence)
-                            _silence_timer = asyncio.create_task(asyncio.sleep(SILENCE_SECONDS))
-                            await _silence_timer
-                            await _save_utterance()
+                            # Save immediately to DB
+                            await insert_transcript(interview_id, "candidate", candidate_text)
+                            msg = f"💬 [SAVED TO DB] \"{candidate_text[:60]}...\""
+                            print(msg); await push_log(msg)
                     
                     # Log other STT events for debugging
                     elif text.startswith('STT_') or '[STT]' in text or '[BOT]' in text:
@@ -463,12 +435,25 @@ async def join_meeting_and_transcribe(
             msg = "⏳ Waiting for host to admit (up to 10 min)..."
             print(msg); await push_log(msg)
             admitted = False
+            admission_start = asyncio.get_event_loop().time()
+            admission_timeout = 120  # 2 minutes max for admission
+            
             for _ in range(600):
                 await page.wait_for_timeout(1000)
+                
+                # Check for actual meeting UI (not just Leave button)
                 try:
-                    if await page.locator('button[aria-label="Leave call"]').count() > 0:
+                    # Look for meeting UI elements that confirm we're actually in meeting
+                    leave_button = await page.locator('button[aria-label="Leave call"]').count()
+                    lobby_wait = await page.locator('text="Waiting for host"').count()
+                    lobby_wait_2 = await page.locator('text="Waiting for admission"').count()
+                    
+                    # Actually admitted if: Leave button visible AND no lobby messages
+                    if leave_button > 0 and lobby_wait == 0 and lobby_wait_2 == 0:
                         admitted = True
                         break
+                        
+                    # Check if meeting ended/denied
                     body = await page.evaluate("() => document.body.innerText.toLowerCase()")
                     if any(x in body for x in ["not found", "has ended", "denied"]):
                         msg = "❌ Denied or meeting ended during wait"
@@ -477,12 +462,28 @@ async def join_meeting_and_transcribe(
                         return
                 except Exception:
                     pass
-
-            if not admitted:
-                msg = "❌ Not admitted within 10 minutes — aborting"
-                print(msg); await push_log(msg)
-                await ctx.close()
-                return
+                
+                # Check admission timeout
+                elapsed = asyncio.get_event_loop().time() - admission_start
+                if elapsed > admission_timeout:
+                    msg = f"❌ Not admitted after {admission_timeout}s — stuck in lobby"
+                    print(msg); await push_log(msg)
+                    
+                    # Mark as abandoned so UI updates
+                    if db:
+                        await db.interviews.update_one(
+                            {"interview_id": interview_id},
+                            {"$set": {
+                                "status": "abandoned",
+                                "ended_at": datetime.utcnow(),
+                                "abandon_reason": f"lobby_timeout ({admission_timeout}s)"
+                            }}
+                        )
+                        msg = "✅ Marked as abandoned in MongoDB"
+                        print(msg); await push_log(msg)
+                    
+                    await ctx.close()
+                    return
 
             msg = "✅ Admitted to meeting!"
             print(msg); await push_log(msg)
@@ -494,10 +495,10 @@ async def join_meeting_and_transcribe(
                 _int_db  = os.getenv("MONGODB_DB", "interviews")
                 _ic = _MotorClient(_int_uri, serverSelectionTimeoutMS=5000)
                 
-                # Wait 3 seconds for bot to fully join meeting audio
-                msg = "⏳ Waiting 3 seconds before greeting..."
+                # Wait 2 seconds for bot to fully join meeting audio
+                msg = "⏳ Waiting 2 seconds before greeting..."
                 print(msg); await push_log(msg)
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(2000)
                 
                 await _ic[_int_db]["interviews"].update_one(
                     {"interview_id": interview_id},
@@ -508,8 +509,8 @@ async def join_meeting_and_transcribe(
             except Exception as _dbe:
                 await push_log(f"⚠️  Failed to set bot_status: {_dbe}")
 
-            # Wait additional 2 seconds for audio to stabilize
-            await page.wait_for_timeout(2000)
+            # Wait additional 3 seconds for audio to stabilize (total 5s)
+            await page.wait_for_timeout(3000)
 
             # Inject Web Speech API
             msg = "🎤 Injecting Web Speech API for BATCH transcription..."
@@ -519,6 +520,23 @@ async def join_meeting_and_transcribe(
             
             msg = "✅ Web Speech API active — capturing speech (will save at end)"
             print(msg); await push_log(msg)
+
+            # Start heartbeat (sends bot_heartbeat to DB every 30 seconds)
+            async def _send_heartbeat():
+                """Send heartbeat to MongoDB every 30 seconds."""
+                try:
+                    while True:
+                        await asyncio.sleep(30)
+                        if db:
+                            await db.interviews.update_one(
+                                {"interview_id": interview_id},
+                                {"$set": {"bot_heartbeat": datetime.utcnow()}}
+                            )
+                except Exception as e:
+                    msg = f"⚠️  Heartbeat error: {e}"
+                    print(msg); await push_log(msg)
+
+            heartbeat_task = asyncio.create_task(_send_heartbeat())
 
             # Run meeting monitor and leave watcher concurrently
             leave_task = asyncio.create_task(
@@ -531,8 +549,33 @@ async def join_meeting_and_transcribe(
             except asyncio.CancelledError:
                 pass
 
+            # Cancel heartbeat
+            if heartbeat_task and not heartbeat_task.done():
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+
+            # CRITICAL: Update status when meeting ends naturally
             msg = "Meeting ended — Web Speech API transcription complete"
             print(msg); await push_log(msg)
+            
+            # Mark interview as completed (bot finished normally)
+            if db:
+                try:
+                    await db.interviews.update_one(
+                        {"interview_id": interview_id},
+                        {"$set": {
+                            "status": "completed",
+                            "ended_at": datetime.utcnow()
+                        }}
+                    )
+                    msg = "✅ Marked as completed in MongoDB"
+                    print(msg); await push_log(msg)
+                except Exception as e:
+                    msg = f"⚠️  Failed to update status: {e}"
+                    print(msg); await push_log(msg)
 
             # Final cleanup - save batch transcript
             if mongo_connected and _transcript_buffer:

@@ -9,6 +9,7 @@ A single DB write fires the full event loop:
 
 import io
 import os
+import subprocess
 from uuid import uuid4
 from datetime import datetime
 
@@ -135,6 +136,97 @@ async def interview_status(interview_id: str = Path(...)):
         "status": doc.get("status"),
         "bot_status": doc.get("bot_status", "pending"),
     })
+
+
+@app.get("/logs", response_class=HTMLResponse)
+async def logs_page(request: Request):
+    """Show log viewer page."""
+    services = [
+        {"name": "cleanup-service", "label": "Cleanup Service (Watchdog)"},
+        {"name": "meeting-bot", "label": "Meeting-Bot"},
+        {"name": "interview-agent", "label": "Main-Agent (LLM)"},
+        {"name": "tts", "label": "TTS (Audio)"},
+        {"name": "mongodb", "label": "MongoDB"},
+        {"name": "ui", "label": "UI (Web)"},
+    ]
+    return templates.TemplateResponse(
+        "logs.html", {"request": request, "services": services}
+    )
+
+
+@app.get("/api/logs")
+async def get_logs(service: str, lines: int = 100):
+    """
+    Fetch logs from Docker for a specific service.
+    
+    Args:
+        service: Service name (cleanup-service, meeting-bot, etc.)
+        lines: Number of log lines to fetch (default: 100)
+    
+    Returns:
+        JSON with log lines as array of strings
+    """
+    # Whitelist of allowed services (prevent command injection)
+    ALLOWED_SERVICES = {
+        "cleanup-service",
+        "meeting-bot",
+        "interview-agent",
+        "tts",
+        "mongodb",
+        "ui",
+    }
+    
+    if service not in ALLOWED_SERVICES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid service. Must be one of: {', '.join(ALLOWED_SERVICES)}"
+        )
+    
+    try:
+        # Run docker compose logs command
+        result = subprocess.run(
+            ["docker", "compose", "logs", "--tail", str(lines), service],
+            capture_output=True,
+            text=True,
+            timeout=10,  # Timeout after 10 seconds
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        
+        if result.returncode != 0:
+            # Return error message as log line
+            return JSONResponse({
+                "service": service,
+                "lines": [f"Error fetching logs: {result.stderr.strip()}"],
+                "error": True
+            })
+        
+        # Parse log output (format: "service-name  |  log message")
+        log_lines = []
+        for line in result.stdout.splitlines():
+            # Remove service prefix if present
+            if "  |  " in line:
+                log_lines.append(line.split("  |  ", 1)[1])
+            elif line.strip():
+                log_lines.append(line)
+        
+        return JSONResponse({
+            "service": service,
+            "lines": log_lines,
+            "error": False
+        })
+        
+    except subprocess.TimeoutExpired:
+        return JSONResponse({
+            "service": service,
+            "lines": ["Error: Log fetch timed out after 10 seconds"],
+            "error": True
+        })
+    except Exception as e:
+        return JSONResponse({
+            "service": service,
+            "lines": [f"Error: {str(e)}"],
+            "error": True
+        })
 
 
 @app.get("/conversations", response_class=HTMLResponse)

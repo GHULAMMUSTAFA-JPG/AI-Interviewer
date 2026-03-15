@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>System Logs - AI Interviewer</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        
+        .controls {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .control-group {
+            display: inline-block;
+            margin-right: 20px;
+            margin-bottom: 10px;
+        }
+        
+        label {
+            font-weight: 600;
+            margin-right: 10px;
+            color: #555;
+        }
+        
+        select, input[type="number"] {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        button {
+            padding: 8px 16px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+        }
+        
+        button:hover {
+            background: #0056b3;
+        }
+        
+        button.active {
+            background: #28a745;
+        }
+        
+        .log-container {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 13px;
+            max-height: 700px;
+            overflow-y: auto;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        
+        .log-line {
+            margin: 3px 0;
+            padding: 4px 8px;
+            border-left: 3px solid transparent;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        
+        .log-line:hover {
+            background: #2d2d2d;
+        }
+        
+        .log-line.error {
+            border-left-color: #f44336;
+            background: rgba(244, 67, 54, 0.1);
+        }
+        
+        .log-line.warning {
+            border-left-color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+        
+        .log-line.success {
+            border-left-color: #4caf50;
+            background: rgba(76, 175, 80, 0.1);
+        }
+        
+        .log-line.info {
+            border-left-color: #2196f3;
+        }
+        
+        .status-bar {
+            background: white;
+            padding: 10px 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        
+        .status-indicator.live {
+            background: #4caf50;
+            animation: pulse 1.5s infinite;
+        }
+        
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.4; }
+            100% { opacity: 1; }
+        }
+        
+        .nav-link {
+            display: inline-block;
+            margin-right: 15px;
+            color: #007bff;
+            text-decoration: none;
+        }
+        
+        .nav-link:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="status-bar">
+        <div>
+            <span class="status-indicator live" id="liveIndicator"></span>
+            <span id="statusText">Live</span>
+        </div>
+        <div>
+            <a href="/" class="nav-link">← Back to Home</a>
+            <a href="/conversations" class="nav-link">Conversations</a>
+        </div>
+    </div>
+    
+    <h1>📋 System Logs</h1>
+    
+    <div class="controls">
+        <div class="control-group">
+            <label for="serviceSelect">Service:</label>
+            <select id="serviceSelect">
+                {% for service in services %}
+                <option value="{{ service.name }}">{{ service.label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        
+        <div class="control-group">
+            <label for="linesInput">Lines:</label>
+            <input type="number" id="linesInput" value="100" min="10" max="500" step="10">
+        </div>
+        
+        <div class="control-group">
+            <button id="refreshBtn" onclick="fetchLogs()">🔄 Refresh</button>
+            <button id="autoRefreshBtn" class="active" onclick="toggleAutoRefresh()">⏸️ Auto-Refresh: ON</button>
+        </div>
+    </div>
+    
+    <div class="log-container" id="logContainer">
+        <div class="log-line">Loading logs...</div>
+    </div>
+    
+    <script>
+        let autoRefresh = true;
+        let refreshInterval = null;
+        
+        function fetchLogs() {
+            const service = document.getElementById('serviceSelect').value;
+            const lines = document.getElementById('linesInput').value;
+            const container = document.getElementById('logContainer');
+            
+            fetch(`/api/logs?service=${service}&lines=${lines}`)
+                .then(response => response.json())
+                .then(data => {
+                    container.innerHTML = '';
+                    
+                    if (data.lines.length === 0) {
+                        container.innerHTML = '<div class="log-line">No logs available</div>';
+                        return;
+                    }
+                    
+                    data.lines.forEach(line => {
+                        const div = document.createElement('div');
+                        div.className = 'log-line';
+                        
+                        // Add styling based on log content
+                        if (line.includes('ERROR') || line.includes('❌') || line.includes('failed')) {
+                            div.className += ' error';
+                        } else if (line.includes('WARN') || line.includes('⚠️')) {
+                            div.className += ' warning';
+                        } else if (line.includes('✅') || line.includes('SUCCESS')) {
+                            div.className += ' success';
+                        } else if (line.includes('INFO') || line.includes('ℹ️')) {
+                            div.className += ' info';
+                        }
+                        
+                        div.textContent = line;
+                        container.appendChild(div);
+                    });
+                    
+                    // Auto-scroll to bottom
+                    container.scrollTop = container.scrollHeight;
+                })
+                .catch(error => {
+                    container.innerHTML = `<div class="log-line error">Error fetching logs: ${error.message}</div>`;
+                });
+        }
+        
+        function toggleAutoRefresh() {
+            autoRefresh = !autoRefresh;
+            const btn = document.getElementById('autoRefreshBtn');
+            
+            if (autoRefresh) {
+                btn.textContent = '⏸️ Auto-Refresh: ON';
+                btn.className = 'active';
+                startAutoRefresh();
+            } else {
+                btn.textContent = '▶️ Auto-Refresh: OFF';
+                btn.className = '';
+                stopAutoRefresh();
+            }
+        }
+        
+        function startAutoRefresh() {
+            if (refreshInterval) clearInterval(refreshInterval);
+            refreshInterval = setInterval(fetchLogs, 3000); // Refresh every 3 seconds
+        }
+        
+        function stopAutoRefresh() {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+                refreshInterval = null;
+            }
+        }
+        
+        // Event listeners
+        document.getElementById('serviceSelect').addEventListener('change', fetchLogs);
+        document.getElementById('linesInput').addEventListener('change', fetchLogs);
+        
+        // Initial load
+        fetchLogs();
+        startAutoRefresh();
+    </script>
+</body>
+</html>

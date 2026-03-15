@@ -178,9 +178,9 @@ async def _watch_new_interviews(db, shutdown_event: asyncio.Event) -> None:
                         logger.info(f"[GREETING] Already sent for {interview_id} — skipping duplicate")
                         continue
 
-                    # Wait 8 seconds total (5 + 3 from bot) for bot to fully join audio
-                    logger.info(f"[GREETING] Waiting 8 seconds for audio to stabilize...")
-                    await asyncio.sleep(8)
+                    # Wait 3 seconds after bot admission for audio to stabilize (total 5s with bot's 2s)
+                    logger.info(f"[GREETING] Waiting 3 seconds for audio to stabilize...")
+                    await asyncio.sleep(3)
 
                     try:
                         await db.transcripts.insert_one({
