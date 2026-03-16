@@ -65,15 +65,17 @@ _SPEECH_API_JS = r"""
     // Don't wait for silence. Stream transcripts in real-time.
     // Only flush final results once to avoid duplicates.
     var __speechBuffer      = '';     // accumulates final text in one turn
-    var __silenceTimer      = null;   // NOT USED - real-time now
+    var __silenceTimer      = null;   // NOT USED - VAD handles silence now
     var __lastSentText      = '';     // dedup: don't send the same sentence twice
     var __lastInterimSent   = '';     // track last interim to avoid spam
+    var __speechStartTime   = null;   // when speech started
+    var __vadActive         = false;  // VAD currently detecting speech
 
     function _getSilenceMs() {
         var words = __speechBuffer.trim().split(/\s+/).filter(Boolean).length;
-        if (words > 20) return 1200;
-        if (words <= 10) return 600;
-        return 800;
+        if (words > 20) return 300;   // VAD-enhanced: faster for long answers
+        if (words <= 10) return 200;  // VAD-enhanced: very fast for short
+        return 250;                   // VAD-enhanced: balanced
     }
 
     // ── STT pause/resume — called by Python via page.evaluate() ───

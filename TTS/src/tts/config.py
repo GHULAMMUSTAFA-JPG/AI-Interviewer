@@ -1,11 +1,24 @@
 """TTS Service Configuration"""
 import os
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, List
 
 from dotenv import load_dotenv, find_dotenv
 
 load_dotenv(find_dotenv(usecwd=True))  # searches up to root .env for local dev
+
+
+def _load_elevenlabs_keys() -> List[str]:
+    """Load all ElevenLabs API keys from environment variables."""
+    keys = []
+    # Try ELEVENLABS_API_KEY first
+    if key := os.getenv("ELEVENLABS_API_KEY", "").strip():
+        keys.append(key)
+    # Then try ELEVENLABS_API_KEY1, ELEVENLABS_API_KEY2, ... up to 20
+    for i in range(1, 21):
+        if key := os.getenv(f"ELEVENLABS_API_KEY{i}", "").strip():
+            keys.append(key)
+    return keys
 
 
 @dataclass(frozen=True)
@@ -26,8 +39,8 @@ class Config:
     pulse_server: str = os.getenv("PULSE_SERVER", "unix:/run/user/1000/pulse/native")
     virtual_mic: str = os.getenv("VIRTUAL_MIC", "virtual_mic")
 
-    # ElevenLabs
-    elevenlabs_api_key: str = os.getenv("ELEVENLABS_API_KEY", "")
+    # ElevenLabs - Support multiple API keys with fallback
+    elevenlabs_api_keys: List[str] = field(default_factory=_load_elevenlabs_keys)
     elevenlabs_voice_id: str = os.getenv(
         "ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"
     )

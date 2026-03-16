@@ -25,11 +25,24 @@ chmod 777 /var/run/pulse
 # Configure PulseAudio for anonymous connections (TTS container needs this)
 mkdir -p /etc/pulse
 cat > /etc/pulse/default.pa << 'EOF'
+# Load native protocol module for TTS container
 load-module module-native-protocol-unix auth-anonymous=1 socket=/var/run/pulse/native
-load-module module-null-sink sink_name=virtual_mic sink_properties=device.description=VirtualMic
-load-module module-remap-source source_name=virtual_mic_source master=virtual_mic.monitor source_properties=device.description=VirtualMicSource
+
+# Create virtual microphone sink (TTS output → Meet input)
+load-module module-null-sink sink_name=virtual_mic sink_properties="device.description=VirtualMic device.class=sound"
+
+# Create monitor source from virtual mic (for STT to capture)
+load-module module-remap-source source_name=virtual_mic_source master=virtual_mic.monitor source_properties="device.description=BotMicCapture device.class=sound"
+
+# Create loopback from system audio to virtual mic (Meet audio → STT)
+load-module module-loopback source=auto_null sink=virtual_mic latency_msec=10
+
+# Set defaults
 set-default-sink virtual_mic
 set-default-source virtual_mic_source
+
+# Increase default sample rate for better quality
+set-default-sample-rate 48000
 EOF
 
 # Start PulseAudio
@@ -39,6 +52,11 @@ sleep 2
 # Verify PulseAudio is running
 if pactl info &>/dev/null; then
     log "✅ PulseAudio running"
+    # List all sources and sinks for debugging
+    log "PulseAudio sources:"
+    pactl list sources short 2>&1 | while read line; do log "  $line"; done
+    log "PulseAudio sinks:"
+    pactl list sinks short 2>&1 | while read line; do log "  $line"; done
 else
     log "❌ PulseAudio NOT running - trying fallback..."
     pulseaudio --daemonize=yes --exit-idle-time=-1 2>&1 || true

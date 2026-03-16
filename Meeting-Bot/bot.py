@@ -43,22 +43,34 @@ _transcript_buffer = []
 # Buffer for current candidate speech (accumulates during speech session)
 _speech_buffer = ""
 _speech_timer = None
-_SPEECH_TIMEOUT_SEC = 2.0  # Save to DB after 2 seconds of silence
+_last_saved_text = ""  # Track what we already saved to prevent duplicates
+_SPEECH_TIMEOUT_SEC = 0.3  # VAD-enhanced: 300ms silence = speech ended (was 2.0s)
 
 
 async def _flush_speech_buffer(interview_id: str) -> None:
     """Save buffered speech to DB after candidate stops speaking."""
-    global _speech_buffer, _speech_timer
+    global _speech_buffer, _speech_timer, _last_saved_text
     
     if _speech_timer:
         _speech_timer.cancel()
         _speech_timer = None
     
     if _speech_buffer.strip():
+        # Check for duplicates - don't save same text twice
+        current_text = _speech_buffer.strip()
+        if current_text == _last_saved_text:
+            msg = f"⚠️  [DUPLICATE PREVENTED] Same as last save"
+            print(msg); await push_log(msg)
+            _speech_buffer = ""
+            return
+            
         # Save full buffered speech to DB
-        await insert_transcript(interview_id, "candidate", _speech_buffer.strip())
-        msg = f"💬 [SAVED TO DB - END OF SPEECH] \"{_speech_buffer[:100]}...\""
+        await insert_transcript(interview_id, "candidate", current_text)
+        msg = f"💬 [SAVED TO DB - END OF SPEECH] \"{current_text[:100]}...\""
         print(msg); await push_log(msg)
+        
+        # Update last saved text
+        _last_saved_text = current_text
         _speech_buffer = ""
 
 
