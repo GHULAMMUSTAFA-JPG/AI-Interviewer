@@ -19,6 +19,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 
 from logger import push_log
@@ -30,11 +31,35 @@ from mongo_handler import (
 )
 from speech_injector import inject_speech_recognition
 
+# Load environment variables (from Docker env or .env file)
+load_dotenv()
+
 # STT Language configuration (from .env)
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "en-US")  # Default: English US
 
 # Store captured transcripts locally during meeting (BATCH mode)
 _transcript_buffer = []
+
+# Buffer for current candidate speech (accumulates during speech session)
+_speech_buffer = ""
+_speech_timer = None
+_SPEECH_TIMEOUT_SEC = 2.0  # Save to DB after 2 seconds of silence
+
+
+async def _flush_speech_buffer(interview_id: str) -> None:
+    """Save buffered speech to DB after candidate stops speaking."""
+    global _speech_buffer, _speech_timer
+    
+    if _speech_timer:
+        _speech_timer.cancel()
+        _speech_timer = None
+    
+    if _speech_buffer.strip():
+        # Save full buffered speech to DB
+        await insert_transcript(interview_id, "candidate", _speech_buffer.strip())
+        msg = f"💬 [SAVED TO DB - END OF SPEECH] \"{_speech_buffer[:100]}...\""
+        print(msg); await push_log(msg)
+        _speech_buffer = ""
 
 
 async def _ensure_mic_on(page) -> None:
@@ -207,8 +232,10 @@ async def join_meeting_and_transcribe(
         8. Capture ALL speech during meeting (buffer locally)
         9. When meeting ends: insert ONE final transcript
     """
-    global _transcript_buffer
+    global _transcript_buffer, _speech_buffer, _speech_timer
     _transcript_buffer = []  # Reset buffer
+    _speech_buffer = ""
+    _speech_timer = None
     
     temp_dir = tempfile.mkdtemp(prefix="meet_bot_")
     session_id = interview_id or datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -294,48 +321,52 @@ async def join_meeting_and_transcribe(
             async def _handle_console(msg):
                 try:
                     text = msg.text
+                    global _speech_buffer, _speech_timer
 
-                    # Capture INTERIM results (real-time as you speak)
-                    if "STT_INTERIM:" in text:
-                        interim_text = text.split("STT_INTERIM:", 1)[1].strip()
+                    # Capture INTERIM results (real-time as you speak) - LOG ONLY, DON'T SAVE
+                    if text.startswith('STT_INTERIM:'):
+                        interim_text = text.split('STT_INTERIM:', 1)[1].strip()
                         if interim_text:
                             msg = f"🎤 [STT INTERIM] {interim_text}"
                             print(msg); await push_log(msg)
                         return
-                    
-                    # Capture TRANSCRIPT_EVENT from Web Speech API (final results)
-                    if "TRANSCRIPT_EVENT:" in text:
-                        candidate_text = text.split("TRANSCRIPT_EVENT:", 1)[1].strip()
-                        if candidate_text:
-                            # Debug: Log EVERYTHING captured with full text
-                            msg = f"🎤 [STT FINAL] Captured: \"{candidate_text}\""
-                            print(msg); await push_log(msg)
 
-                            # Filter out bot's own greeting (prevents echo loop)
-                            text_lower = candidate_text.lower()
+                    # Capture speech start - reset buffer
+                    if text.startswith('STT_SPEECH_START:'):
+                        _speech_buffer = ""
+                        msg = "🎤 [SPEECH STARTED] Candidate speaking..."
+                        print(msg); await push_log(msg)
+                        return
+
+                    # Capture speech end - schedule save after silence
+                    if text.startswith('STT_SPEECH_END:'):
+                        msg = "🔇 [SPEECH ENDED] Waiting 2s silence before saving..."
+                        print(msg); await push_log(msg)
+                        # Cancel existing timer
+                        if _speech_timer:
+                            _speech_timer.cancel()
+                        # Schedule save after 2 seconds of silence
+                        _speech_timer = asyncio.create_task(
+                            asyncio.sleep(_SPEECH_TIMEOUT_SEC)
+                        )
+                        await _speech_timer
+                        await _flush_speech_buffer(interview_id)
+                        return
+
+                    # Capture TRANSCRIPT_EVENT from Web Speech API (final results - accumulate during speech)
+                    if text.startswith('TRANSCRIPT_EVENT:'):
+                        final_text = text.split('TRANSCRIPT_EVENT:', 1)[1].strip()
+                        if final_text:
+                            # Accumulate into buffer (candidate may continue speaking)
+                            if _speech_buffer:
+                                _speech_buffer += " " + final_text
+                            else:
+                                _speech_buffer = final_text
                             
-                            # Check each phrase
-                            is_greeting = False
-                            matched_phrase = None
-                            for phrase in GREETING_PHRASES:
-                                if phrase in text_lower:
-                                    is_greeting = True
-                                    matched_phrase = phrase
-                                    break
-
-                            if is_greeting:
-                                msg = f"🔇 [FILTERED] Greeting detected (matched '{matched_phrase}')"
-                                print(msg); await push_log(msg)
-                                return
-                            
-                            msg = f"✅ [ACCEPTED] Candidate speech: \"{candidate_text[:100]}...\""
+                            msg = f"🎤 [STT FINAL - BUFFERING] \"{final_text}\" → Buffer: \"{_speech_buffer[:100]}...\""
                             print(msg); await push_log(msg)
+                        return
 
-                            # Save immediately to DB
-                            await insert_transcript(interview_id, "candidate", candidate_text)
-                            msg = f"💬 [SAVED TO DB] \"{candidate_text[:60]}...\""
-                            print(msg); await push_log(msg)
-                    
                     # Log other STT events for debugging
                     elif text.startswith('STT_') or '[STT]' in text or '[BOT]' in text:
                         # Only log important events
@@ -576,6 +607,10 @@ async def join_meeting_and_transcribe(
                 except Exception as e:
                     msg = f"⚠️  Failed to update status: {e}"
                     print(msg); await push_log(msg)
+
+            # Final cleanup - save any remaining buffered speech
+            if _speech_buffer.strip():
+                await _flush_speech_buffer(interview_id)
 
             # Final cleanup - save batch transcript
             if mongo_connected and _transcript_buffer:

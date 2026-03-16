@@ -189,7 +189,7 @@ _SPEECH_API_JS = r"""
         for (var i = event.resultIndex; i < event.results.length; i++) {
             var text = event.results[i][0].transcript;
             var conf = event.results[i][0].confidence;
-            
+
             if (event.results[i].isFinal) {
                 // Accumulate final results
                 finalText += (text + ' ');
@@ -197,21 +197,20 @@ _SPEECH_API_JS = r"""
             } else {
                 // INTERIM results - emit IMMEDIATELY for real-time
                 interimText += text;
+                // CRITICAL: Emit EVERY interim update (word-by-word)
+                console.log('STT_INTERIM:' + interimText.trim());
             }
         }
 
         window.__lastTranscript = interimText || __speechBuffer;
 
-        // EMIT INTERIM IMMEDIATELY (real-time as you speak)
-        if (interimText.trim()) {
-            console.log('STT_INTERIM:' + interimText.trim());
-        }
-        
         // Buffer final results and emit once
         if (finalText.trim()) {
             __speechBuffer += finalText;
             console.log('[AGENT] Generating response');
             console.log('💬 [BOT] Buffered final: ' + finalText.trim());
+            // Emit TRANSCRIPT_EVENT for Python capture (final only)
+            console.log('TRANSCRIPT_EVENT:' + finalText.trim());
         }
     };
 
