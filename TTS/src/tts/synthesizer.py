@@ -25,7 +25,8 @@ def _raise_for_status(response: httpx.Response, api_key_index: int) -> None:
     if response.status_code == 402:
         # Payment required - try next key
         raise ElevenLabsAuthError(
-            f"ElevenLabs API key #{api_key_index + 1} has no credits - trying next key", status_code=402
+            f"ElevenLabs API key #{api_key_index + 1} ({api_key[:4]}...{api_key[-4:]}) has no credits or quota (HTTP 402) - trying next key", 
+            status_code=402
         )
     if response.status_code == 429:
         raise ElevenLabsRateLimitError(

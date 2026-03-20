@@ -211,8 +211,6 @@ _SPEECH_API_JS = r"""
             __speechBuffer += finalText;
             console.log('[AGENT] Generating response');
             console.log('💬 [BOT] Buffered final: ' + finalText.trim());
-            // Emit TRANSCRIPT_EVENT for Python capture (final only)
-            console.log('TRANSCRIPT_EVENT:' + finalText.trim());
         }
     };
 

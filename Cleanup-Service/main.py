@@ -12,11 +12,12 @@ This is a reconciliation controller - independent of bot/agent failures.
 """
 
 import asyncio
+import os
 from datetime import datetime, timedelta
 from motor.motor_asyncio import AsyncIOMotorClient
 
-MONGO_URI = "mongodb://mongodb:27017/?replicaSet=rs0"
-DB_NAME = "interviews"
+MONGO_URI = os.getenv("MONGODB_URI", "mongodb://host.docker.internal:27017/?replicaSet=rs0")
+DB_NAME = os.getenv("MONGODB_DB", "interviews")
 
 # Timeouts
 HEARTBEAT_TIMEOUT_MINUTES = 2

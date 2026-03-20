@@ -16,7 +16,7 @@ from logger import push_log
 
 load_dotenv()
 
-MONGO_URI = os.getenv("MONGODB_URI", "mongodb://mongodb:27017/?replicaSet=rs0")
+MONGO_URI = os.getenv("MONGODB_URI", "mongodb://host.docker.internal:27017/?replicaSet=rs0")
 BOT_EMAIL = os.getenv("BOT_EMAIL", "bot@example.com")
 DB_NAME = "interviews"
 

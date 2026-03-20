@@ -4,45 +4,48 @@ set -e
 export DISPLAY=:99
 export PULSE_SERVER=unix:/var/run/pulse/native
 export PYTHONUNBUFFERED=1
+export VNC_PASSWORD=meetingbot123
 
 log() { echo "[$(date '+%H:%M:%S')] $1"; }
 
 # Clean stale locks
 rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
-pkill -9 Xvfb pulseaudio 2>/dev/null || true
+pkill -9 Xvfb pulseaudio x11vnc 2>/dev/null || true
 
-# Start Xvfb (fast)
+# Start Xvfb (virtual display for Chrome)
 log "Starting Xvfb :99..."
 Xvfb :99 -screen 0 1280x720x24 -ac +extension GLX +render -noreset -nolisten tcp &
 sleep 1
 log "✅ Xvfb running"
 
-# Start PulseAudio as regular daemon (not system mode)
+# Start VNC server for remote desktop access (debugging)
+log "Starting VNC server on port 5900..."
+x11vnc -display :99 -forever -shared -rfbauth <(x11vnc -storepasswd $VNC_PASSWORD /tmp/vncpass) -listen 0.0.0.0 -nopw &
+sleep 1
+log "✅ VNC server running on port 5900 (password: $VNC_PASSWORD)"
+
+# Start PulseAudio - MATCH OTHER PROJECT'S CONFIG
 log "Starting PulseAudio..."
 mkdir -p /var/run/pulse /root/.config/pulse
 chmod 777 /var/run/pulse
 
-# Configure PulseAudio for anonymous connections (TTS container needs this)
+# Configure PulseAudio (exact same as other project)
 mkdir -p /etc/pulse
 cat > /etc/pulse/default.pa << 'EOF'
-# Load native protocol module for TTS container
+# Load native protocol for TTS container
 load-module module-native-protocol-unix auth-anonymous=1 socket=/var/run/pulse/native
 
-# Create virtual microphone sink (TTS output → Meet input)
-load-module module-null-sink sink_name=virtual_mic sink_properties="device.description=VirtualMic device.class=sound"
+# Create virtual devices (exact same as other project)
+load-module module-null-sink sink_name=VirtualSink sink_properties="device.description=VirtualSink"
+load-module module-remap-source source_name=BotMic master=VirtualSink.monitor source_properties="device.description=BotMicCapture"
+load-module module-null-sink sink_name=virtual_mic sink_properties="device.description=VirtualMic"
+load-module module-remap-source source_name=virtual_mic_source master=virtual_mic.monitor source_properties="device.description=VirtualMicSource"
 
-# Create monitor source from virtual mic (for STT to capture)
-load-module module-remap-source source_name=virtual_mic_source master=virtual_mic.monitor source_properties="device.description=BotMicCapture device.class=sound"
-
-# Create loopback from system audio to virtual mic (Meet audio → STT)
-load-module module-loopback source=auto_null sink=virtual_mic latency_msec=10
-
-# Set defaults
-set-default-sink virtual_mic
+# Set defaults (exact same as other project)
+set-default-sink VirtualSink
 set-default-source virtual_mic_source
 
-# Increase default sample rate for better quality
-set-default-sample-rate 48000
+# Keep virtual_mic running (prevents Chrome WebRTC suspension)
 EOF
 
 # Start PulseAudio
@@ -52,7 +55,7 @@ sleep 2
 # Verify PulseAudio is running
 if pactl info &>/dev/null; then
     log "✅ PulseAudio running"
-    # List all sources and sinks for debugging
+    # Show device list for debugging
     log "PulseAudio sources:"
     pactl list sources short 2>&1 | while read line; do log "  $line"; done
     log "PulseAudio sinks:"
@@ -63,7 +66,13 @@ else
     sleep 1
 fi
 
-# Chrome audio policy (parallel)
+# AFTER PulseAudio starts, start keep-alive for virtual_mic (matches other project)
+log "Starting virtual_mic keep-alive (silence)..."
+pacat --playback --device=virtual_mic \
+      --format=s16le --rate=22050 --channels=1 \
+      < /dev/zero &
+
+# Chrome audio policy
 log "Writing Chrome audio policy..."
 mkdir -p /etc/opt/chrome/policies/managed
 cat > /etc/opt/chrome/policies/managed/allow_audio.json << 'EOF'
@@ -73,7 +82,7 @@ cat > /etc/opt/chrome/policies/managed/allow_audio.json << 'EOF'
 }
 EOF
 
-# ALSA config (parallel)
+# ALSA config
 cat > /etc/asound.conf << 'EOF'
 pcm.pulse { type pulse }
 ctl.pulse { type pulse }

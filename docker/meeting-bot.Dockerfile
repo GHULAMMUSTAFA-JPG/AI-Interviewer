@@ -1,5 +1,6 @@
 # ════════════════════════════════════════════════════════════════════════════════
-# Meeting-Bot — Headless Chrome + PulseAudio
+# Meeting-Bot — Headless Chrome + PulseAudio + Persistent Profile
+# VNC REMOVED - runs headless only
 # ════════════════════════════════════════════════════════════════════════════════
 
 FROM ubuntu:22.04
@@ -59,7 +60,7 @@ RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add
 RUN google-chrome --version
 
 # ════════════════════════════════════════════════════════════════════════════════
-# Xvfb — Virtual display (required by Chrome)
+# Xvfb + VNC — Virtual display with remote desktop access for debugging
 # ════════════════════════════════════════════════════════════════════════════════
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -67,6 +68,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     x11-utils \
     fonts-liberation \
     fonts-noto-color-emoji \
+    \
+    # VNC Server for remote desktop access
+    x11vnc \
+    \
+    # Cleanup
     && rm -rf /var/lib/apt/lists/*
 
 # ════════════════════════════════════════════════════════════════════════════════

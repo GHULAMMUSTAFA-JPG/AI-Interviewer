@@ -282,12 +282,25 @@ async def join_meeting_and_transcribe(
 
     async with async_playwright() as p:
         try:
-            msg = "🌐 Launching Chromium..."
+            # FIX: Remove stale Chrome SingletonLock file (prevents "ProcessSingleton" errors)
+            chrome_profile_dir = "/app/chrome_profile"
+            lock_file = Path(chrome_profile_dir) / "SingletonLock"
+            if lock_file.exists():
+                try:
+                    lock_file.unlink()
+                    msg = f"🔧 Removed stale Chrome lock file: {lock_file}"
+                    print(msg); await push_log(msg)
+                except Exception as e:
+                    msg = f"⚠️  Failed to remove lock file: {e} (will try anyway)"
+                    print(msg); await push_log(msg)
+
+            msg = "🌐 Launching Chromium (with persistent profile)..."
             print(msg); await push_log(msg)
 
+            # Use persistent Chrome profile for cookies/login state
             ctx = await p.chromium.launch_persistent_context(
-                user_data_dir=temp_dir,
-                headless=headless,
+                user_data_dir=chrome_profile_dir,
+                headless=True,  # Run headless but visible via VNC
                 channel="chrome",
                 args=[
                     "--no-sandbox",
@@ -304,11 +317,20 @@ async def join_meeting_and_transcribe(
                     "--disable-features=AudioServiceSandbox,AudioServiceOutOfProcess",
                     "--alsa-output-device=pulse",
                     "--alsa-input-device=pulse",
+                    # Keep profile clean
+                    "--disable-background-networking",
+                    "--disable-default-apps",
+                    "--disable-extensions",
+                    "--disable-sync",
+                    "--no-first-run",
                 ],
                 accept_downloads=False,
                 ignore_default_args=["--enable-automation"],
                 viewport={"width": 1280, "height": 720},
             )
+
+            msg = f"✅ Chrome launched with profile: {chrome_profile_dir}"
+            print(msg); await push_log(msg)
 
             await ctx.grant_permissions(["microphone"], origin="https://meet.google.com")
 
@@ -330,6 +352,9 @@ async def join_meeting_and_transcribe(
                 "hello welcome to your interview could you please",
             ]
             
+            # Track bot speaking status for interruption and echo cancellation
+            status_state = {"bot_speaking": False}
+            
             async def _handle_console(msg):
                 try:
                     text = msg.text
@@ -339,12 +364,30 @@ async def join_meeting_and_transcribe(
                     if text.startswith('STT_INTERIM:'):
                         interim_text = text.split('STT_INTERIM:', 1)[1].strip()
                         if interim_text:
+                            # TRIGGER INTERRUPT: If candidate speaks while bot is talking
+                            if status_state["bot_speaking"]:
+                                await db.interviews.update_one(
+                                    {"interview_id": interview_id},
+                                    {"$set": {"tts_interrupt": True}}
+                                )
+                                msg_log = "⚡ [INTERRUPT] Candidate spoke while bot was talking"
+                                print(msg_log); await push_log(msg_log)
+
                             msg = f"🎤 [STT INTERIM] {interim_text}"
                             print(msg); await push_log(msg)
                         return
 
                     # Capture speech start - reset buffer
                     if text.startswith('STT_SPEECH_START:'):
+                        # TRIGGER INTERRUPT: If candidate starts speaking while bot is talking
+                        if status_state["bot_speaking"]:
+                            await db.interviews.update_one(
+                                {"interview_id": interview_id},
+                                {"$set": {"tts_interrupt": True}}
+                            )
+                            msg_log = "⚡ [INTERRUPT] Candidate started speaking"
+                            print(msg_log); await push_log(msg_log)
+
                         _speech_buffer = ""
                         msg = "🎤 [SPEECH STARTED] Candidate speaking..."
                         print(msg); await push_log(msg)
@@ -352,12 +395,12 @@ async def join_meeting_and_transcribe(
 
                     # Capture speech end - schedule save after silence
                     if text.startswith('STT_SPEECH_END:'):
-                        msg = "🔇 [SPEECH ENDED] Waiting 2s silence before saving..."
+                        msg = f"🔇 [SPEECH ENDED] Finalizing transcript (timeout={_SPEECH_TIMEOUT_SEC}s)..."
                         print(msg); await push_log(msg)
                         # Cancel existing timer
                         if _speech_timer:
                             _speech_timer.cancel()
-                        # Schedule save after 2 seconds of silence
+                        # Schedule save after a short delay to ensure all TRANSCRIPT_EVENTs are in
                         _speech_timer = asyncio.create_task(
                             asyncio.sleep(_SPEECH_TIMEOUT_SEC)
                         )
@@ -531,6 +574,21 @@ async def join_meeting_and_transcribe(
             msg = "✅ Admitted to meeting!"
             print(msg); await push_log(msg)
 
+            # CRITICAL: Switch default source to BotMic for STT (matches other project)
+            # This ensures Web Speech API captures meeting audio, not TTS silence
+            try:
+                result = await asyncio.create_subprocess_exec(
+                    "pactl", "set-default-source", "BotMic",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await result.communicate()
+                msg = f"✅ Switched default source to BotMic for STT"
+                print(msg); await push_log(msg)
+            except Exception as e:
+                msg = f"⚠️  Failed to switch to BotMic: {e}"
+                print(msg); await push_log(msg)
+
             # Signal interview-agent to send greeting (after proper delay)
             try:
                 from motor.motor_asyncio import AsyncIOMotorClient as _MotorClient
@@ -581,6 +639,39 @@ async def join_meeting_and_transcribe(
 
             heartbeat_task = asyncio.create_task(_send_heartbeat())
 
+            # Start watching bot_speaking to pause STT and prevent echo
+            async def _watch_bot_speaking():
+                pipeline = [
+                    {
+                        "$match": {
+                            "operationType": "update",
+                            "fullDocument.interview_id": interview_id,
+                        }
+                    }
+                ]
+                try:
+                    async with db.interviews.watch(pipeline, full_document="updateLookup") as stream:
+                        async for change in stream:
+                            full_doc = change.get("fullDocument") or {}
+                            is_speaking = full_doc.get("bot_speaking", False)
+                            
+                            if is_speaking != status_state["bot_speaking"]:
+                                status_state["bot_speaking"] = is_speaking
+                                if is_speaking:
+                                    msg = "🔇 Bot started speaking — pausing STT to prevent echo"
+                                    print(msg); await push_log(msg)
+                                    await page.evaluate("window.__pauseSTT()")
+                                else:
+                                    msg = "🔊 Bot stopped speaking — resuming STT"
+                                    print(msg); await push_log(msg)
+                                    await page.evaluate("window.__resumeSTT()")
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    print(f"Bot speaking watcher error: {e}")
+
+            speaking_watcher_task = asyncio.create_task(_watch_bot_speaking())
+
             # Run meeting monitor and leave watcher concurrently
             leave_task = asyncio.create_task(
                 _watch_for_leave(interview_id, page)
@@ -592,13 +683,14 @@ async def join_meeting_and_transcribe(
             except asyncio.CancelledError:
                 pass
 
-            # Cancel heartbeat
-            if heartbeat_task and not heartbeat_task.done():
-                heartbeat_task.cancel()
-                try:
-                    await heartbeat_task
-                except asyncio.CancelledError:
-                    pass
+            # Cancel heartbeat and speaking watcher
+            for task in [heartbeat_task, speaking_watcher_task]:
+                if task and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
 
             # CRITICAL: Update status when meeting ends naturally
             msg = "Meeting ended — Web Speech API transcription complete"
@@ -652,8 +744,8 @@ async def join_meeting_and_transcribe(
 async def main():
     """Main entry point — watches interviews.interviews for new meetings."""
     from motor.motor_asyncio import AsyncIOMotorClient
-    
-    mongo_uri = os.getenv("MONGODB_URI", "mongodb://mongodb:27017/?replicaSet=rs0")
+
+    mongo_uri = os.getenv("MONGODB_URI", "mongodb://host.docker.internal:27017/?replicaSet=rs0")
     db_name = os.getenv("MONGODB_DB", "interviews")
     bot_email = os.getenv("BOT_EMAIL", "bot@example.com")
     
