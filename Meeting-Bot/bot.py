@@ -298,9 +298,10 @@ async def join_meeting_and_transcribe(
             print(msg); await push_log(msg)
 
             # Use persistent Chrome profile for cookies/login state
+            # NOTE: headless=False so you can see the browser via VNC for debugging/admission
             ctx = await p.chromium.launch_persistent_context(
                 user_data_dir=chrome_profile_dir,
-                headless=True,  # Run headless but visible via VNC
+                headless=False,  # Set to False so you can see the bot via VNC to admit it
                 channel="chrome",
                 args=[
                     "--no-sandbox",
@@ -323,10 +324,12 @@ async def join_meeting_and_transcribe(
                     "--disable-extensions",
                     "--disable-sync",
                     "--no-first-run",
+                    # Full screen
+                    "--start-maximized",
                 ],
                 accept_downloads=False,
                 ignore_default_args=["--enable-automation"],
-                viewport={"width": 1280, "height": 720},
+                viewport={"width": 1920, "height": 1080},
             )
 
             msg = f"✅ Chrome launched with profile: {chrome_profile_dir}"
@@ -640,6 +643,7 @@ async def join_meeting_and_transcribe(
             heartbeat_task = asyncio.create_task(_send_heartbeat())
 
             # Start watching bot_speaking to pause STT and prevent echo
+            # NEW: Uses __tts_started/__tts_ended for better echo cancellation
             async def _watch_bot_speaking():
                 pipeline = [
                     {
@@ -654,17 +658,19 @@ async def join_meeting_and_transcribe(
                         async for change in stream:
                             full_doc = change.get("fullDocument") or {}
                             is_speaking = full_doc.get("bot_speaking", False)
-                            
+
                             if is_speaking != status_state["bot_speaking"]:
                                 status_state["bot_speaking"] = is_speaking
                                 if is_speaking:
                                     msg = "🔇 Bot started speaking — pausing STT to prevent echo"
                                     print(msg); await push_log(msg)
-                                    await page.evaluate("window.__pauseSTT()")
+                                    # NEW: Call TTS gate to clear buffer and block STT
+                                    await page.evaluate("window.__tts_started()")
                                 else:
                                     msg = "🔊 Bot stopped speaking — resuming STT"
                                     print(msg); await push_log(msg)
-                                    await page.evaluate("window.__resumeSTT()")
+                                    # NEW: Call TTS gate to unblock STT after echo delay
+                                    await page.evaluate("window.__tts_ended()")
                 except asyncio.CancelledError:
                     pass
                 except Exception as e:

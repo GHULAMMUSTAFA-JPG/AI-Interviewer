@@ -14,15 +14,24 @@ pkill -9 Xvfb pulseaudio x11vnc 2>/dev/null || true
 
 # Start Xvfb (virtual display for Chrome)
 log "Starting Xvfb :99..."
-Xvfb :99 -screen 0 1280x720x24 -ac +extension GLX +render -noreset -nolisten tcp &
+Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset -nolisten tcp &
 sleep 1
 log "✅ Xvfb running"
 
 # Start VNC server for remote desktop access (debugging)
 log "Starting VNC server on port 5900..."
-x11vnc -display :99 -forever -shared -rfbauth <(x11vnc -storepasswd $VNC_PASSWORD /tmp/vncpass) -listen 0.0.0.0 -nopw &
+# Create VNC password file
+x11vnc -storepasswd $VNC_PASSWORD /tmp/vncpass 2>/dev/null
+# Start VNC with password auth
+x11vnc -display :99 -forever -shared -rfbauth /tmp/vncpass -listen 0.0.0.0 -o /var/log/x11vnc.log &
 sleep 1
 log "✅ VNC server running on port 5900 (password: $VNC_PASSWORD)"
+
+# Start noVNC web server (web-based VNC viewer - no download needed!)
+log "Starting noVNC web server on port 6080..."
+/app/venv/bin/python -m websockify --web=/usr/share/novnc 6080 localhost:5900 > /var/log/websockify.log 2>&1 &
+sleep 2
+log "✅ noVNC available at http://localhost:6080/vnc.html"
 
 # Start PulseAudio - MATCH OTHER PROJECT'S CONFIG
 log "Starting PulseAudio..."

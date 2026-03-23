@@ -16,3 +16,6 @@ aiohttp>=3.9.0
 
 # System & Environment
 pytz>=2024.1
+
+# VNC Web Interface (noVNC)
+websockify>=0.10.0

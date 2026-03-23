@@ -24,29 +24,26 @@ services:
   # ────────────────────────────────────────────────────────────────
   # MongoDB 7 with single-node replica set.
   # Change streams (used by all services) require a replica set.
-  # NOTE: This container is disabled - using your LOCAL MongoDB instead
   # ────────────────────────────────────────────────────────────────
   mongodb:
     image: mongo:7.0
     container_name: mongodb
     command: ["--replSet", "rs0", "--bind_ip_all"]
-    # ports:
-    #   - "27017:27017"       # DISABLED - using local MongoDB on port 27017
-    # volumes:
-    #   - mongodb_data:/data/db
+    ports:
+      - "27017:27017"       # EXPOSED - Connect Compass to mongodb://localhost:27017
+    volumes:
+      - mongodb_data:/data/db
     networks:
       - interview-net
-    # extra_hosts:
-    #   - "host.docker.internal:host-gateway"
-    # healthcheck:
-    #   test: ["CMD", "mongosh", "--host", "host.docker.internal", "--quiet", "--eval", "db.adminCommand('ping').ok"]
-    #   interval: 10s
-    #   timeout: 5s
-    #   retries: 5
-    #   start_period: 15s
-    restart: "no"
-    profiles:
-      - disabled  # This service won't start by default
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "mongosh", "--host", "localhost", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
 
   # ────────────────────────────────────────────────────────────────
   # One-shot: initialise the replica set on first boot.
@@ -131,6 +128,7 @@ services:
   # ────────────────────────────────────────────────────────────────
   # Meeting-Bot: headless Chrome + caption scraper.
   # VNC enabled for debugging - connect to localhost:5900
+  # noVNC web interface available at http://localhost:6080/vnc.html
   # ────────────────────────────────────────────────────────────────
   meeting-bot:
     build:
@@ -147,7 +145,8 @@ services:
     networks:
       - interview-net
     ports:
-      - "5900:5900"  # VNC port for debugging
+      - "5900:5900"  # VNC port for desktop clients
+      - "6080:6080"  # noVNC web interface
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "bash", "-c", "pactl info &>/dev/null"]

@@ -1,6 +1,6 @@
 # ════════════════════════════════════════════════════════════════════════════════
 # Meeting-Bot — Headless Chrome + PulseAudio + Persistent Profile
-# VNC REMOVED - runs headless only
+# VNC enabled for debugging - connect to localhost:5900 (password: meetingbot123)
 # ════════════════════════════════════════════════════════════════════════════════
 
 FROM ubuntu:22.04
@@ -71,6 +71,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     \
     # VNC Server for remote desktop access
     x11vnc \
+    \
+    # noVNC for web-based VNC viewer (accessible via browser)
+    novnc \
     \
     # Cleanup
     && rm -rf /var/lib/apt/lists/*
