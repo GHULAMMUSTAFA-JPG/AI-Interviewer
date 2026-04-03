@@ -102,6 +102,9 @@ services:
       context: ./Main-Agent
       dockerfile: ../docker/main-agent.Dockerfile
     container_name: interview-agent
+    depends_on:
+      redis:
+        condition: service_healthy
     env_file:
       - .env.docker
     networks:
@@ -119,6 +122,9 @@ services:
       context: ./Cleanup-Service
       dockerfile: ../docker/cleanup-service.Dockerfile
     container_name: cleanup-service
+    depends_on:
+      redis:
+        condition: service_healthy
     env_file:
       - .env.docker
     networks:
@@ -138,6 +144,8 @@ services:
     container_name: tts
     depends_on:
       meeting-bot:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     env_file:
       - .env.docker
@@ -163,6 +171,9 @@ services:
       context: ./Meeting-Bot
       dockerfile: ../docker/meeting-bot.Dockerfile
     container_name: meeting-bot
+    depends_on:
+      redis:
+        condition: service_healthy
     env_file:
       - .env.docker
     shm_size: "2gb"
@@ -191,6 +202,9 @@ services:
       context: ./UI
       dockerfile: ../docker/ui.Dockerfile
     container_name: ui
+    depends_on:
+      redis:
+        condition: service_healthy
     env_file:
       - .env.docker
     ports:
