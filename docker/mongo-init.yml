@@ -1,0 +1,45 @@
+# MongoDB Replica Set Initialization
+# This container runs ONCE, initializes rs0, then exits
+services:
+  mongo-init:
+    image: mongo:7.0
+    container_name: mongo-init
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    entrypoint:
+      - bash
+      - -c
+      - |
+        echo "=== MongoDB Replica Set Initialization ==="
+        echo "Waiting for MongoDB to be ready..."
+        sleep 5
+        echo "Checking if replica set exists..."
+        mongosh --host mongodb:27017 --quiet --eval '
+          try {
+            var status = rs.status();
+            print("✅ Replica set already initialized: " + status.set);
+            print("   Members: " + status.members.length);
+            status.members.forEach(m => print("   - " + m.name + " (" + m.stateStr + ")"));
+          } catch(e) {
+            print("Initializing replica set rs0...");
+            var result = rs.initiate({
+              _id: "rs0",
+              members: [{_id: 0, host: "mongodb:27017"}]
+            });
+            if (result.ok === 1) {
+              print("✅ Replica set initialized successfully!");
+              print("   Waiting for primary election...");
+              sleep(5000);
+              var status = rs.status();
+              print("   Status: " + status.myState + " (1=PRIMARY)");
+            } else {
+              print("❌ Failed to initialize: " + result.errmsg);
+              exit(1);
+            }
+          }
+        '
+        echo "=== MongoDB Init Complete ==="
+    networks:
+      - interview-net
+    restart: "no"
