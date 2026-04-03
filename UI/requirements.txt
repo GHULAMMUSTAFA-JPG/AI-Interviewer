@@ -7,3 +7,4 @@ python-dotenv
 python-multipart
 pdfplumber
 python-docx
+redis>=5.0.0 
