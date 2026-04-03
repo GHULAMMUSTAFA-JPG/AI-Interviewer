@@ -169,6 +169,24 @@ async def _watch_new_interviews(db, shutdown_event: asyncio.Event) -> None:
 
                     logger.info(f"[BOT ADMITTED] {interview_id} — waiting 5 seconds before inserting greeting")
 
+                    # PRE-WARM: Load interview context into cache before candidate speaks
+                    try:
+                        interview_doc = await db.interviews.find_one({"interview_id": interview_id})
+                        if interview_doc:
+                            # Pre-load context so first response is faster
+                            from src.config import interview_cache
+                            cache_key = f"context:{interview_id}"
+                            if cache_key not in interview_cache:
+                                interview_cache[cache_key] = {
+                                    "job_description": interview_doc.get("job_description", ""),
+                                    "company_info": interview_doc.get("company_info", ""),
+                                    "candidate_cv": interview_doc.get("candidate_cv", ""),
+                                    "loaded_at": datetime.utcnow()
+                                }
+                                logger.info(f"[CONTEXT PRE-WARMED] {interview_id}")
+                    except Exception as ctx_exc:
+                        logger.warning(f"[CONTEXT PRE-WARM] Failed for {interview_id}: {ctx_exc}")
+
                     # Idempotency guard: skip if a greeting was already sent
                     existing = await db.transcripts.find_one({
                         "interview_id": interview_id,
