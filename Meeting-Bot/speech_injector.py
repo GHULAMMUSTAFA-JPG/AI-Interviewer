@@ -74,7 +74,7 @@ SPEECH_INJECTION_SCRIPT = """
 
             if (!speechActive) {
                 speechActive = true;
-                emit("SPEECH_START:");
+                emit("STT_SPEECH_START:");
             }
 
             // Cancel any pending silence save
@@ -117,7 +117,7 @@ SPEECH_INJECTION_SCRIPT = """
         r.onspeechend = function() {
             if (isBotSpeaking) return;
 
-            emit("SPEECH_END:");
+            emit("STT_SPEECH_END:");
 
             // Merge session into final transcript
             if (sessionTranscript.trim()) {
@@ -130,7 +130,7 @@ SPEECH_INJECTION_SCRIPT = """
             silenceTimer = setTimeout(function() {
                 const text = finalTranscript.trim();
                 if (text && !isBotSpeaking) {
-                    emit("TRANSCRIPT_FINAL:", text);
+                    emit("TRANSCRIPT_EVENT:", text);
                     finalTranscript = "";  // Clear after saving
                     speechActive = false;
                 }

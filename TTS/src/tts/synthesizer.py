@@ -16,7 +16,7 @@ from .exceptions import (
 logger = logging.getLogger(__name__)
 
 
-def _raise_for_status(response: httpx.Response, api_key_index: int) -> None:
+def _raise_for_status(response: httpx.Response, api_key_index: int, api_key: str) -> None:
     """Raise typed ElevenLabs exceptions based on HTTP status code."""
     if response.status_code == 401:
         raise ElevenLabsAuthError(
@@ -123,7 +123,7 @@ class ElevenLabsSynthesizer:
                 async with client.stream(
                     "POST", url, headers=headers, json=body
                 ) as response:
-                    _raise_for_status(response, key_index)
+                    _raise_for_status(response, key_index, api_key)
                     chunk_count = 0
                     async for chunk in response.aiter_bytes(
                         chunk_size=config.chunk_size

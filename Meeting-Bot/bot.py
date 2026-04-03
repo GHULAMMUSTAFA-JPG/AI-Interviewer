@@ -41,7 +41,7 @@ STT_LANGUAGE = os.getenv("STT_LANGUAGE", "en-US")  # Default: English US
 _transcript_buffer = []
 
 # Buffer for current candidate speech (accumulates during speech session)
-_speech_buffer = ""
+last_speech_time = asyncio.get_event_loop().time()\n                        _speech_buffer = ""
 _speech_timer = None
 _last_saved_text = ""  # Track what we already saved to prevent duplicates
 _SPEECH_TIMEOUT_SEC = 0.3  # VAD-enhanced: 300ms silence = speech ended (was 2.0s)
@@ -61,7 +61,7 @@ async def _flush_speech_buffer(interview_id: str) -> None:
         if current_text == _last_saved_text:
             msg = f"⚠️  [DUPLICATE PREVENTED] Same as last save"
             print(msg); await push_log(msg)
-            _speech_buffer = ""
+            last_speech_time = asyncio.get_event_loop().time()\n                        _speech_buffer = ""
             return
             
         # Save full buffered speech to DB
@@ -71,7 +71,7 @@ async def _flush_speech_buffer(interview_id: str) -> None:
         
         # Update last saved text
         _last_saved_text = current_text
-        _speech_buffer = ""
+        last_speech_time = asyncio.get_event_loop().time()\n                        _speech_buffer = ""
 
 
 async def _ensure_mic_on(page) -> None:
@@ -246,7 +246,7 @@ async def join_meeting_and_transcribe(
     """
     global _transcript_buffer, _speech_buffer, _speech_timer
     _transcript_buffer = []  # Reset buffer
-    _speech_buffer = ""
+    last_speech_time = asyncio.get_event_loop().time()\n                        _speech_buffer = ""
     _speech_timer = None
     
     temp_dir = tempfile.mkdtemp(prefix="meet_bot_")
@@ -391,7 +391,7 @@ async def join_meeting_and_transcribe(
                             msg_log = "⚡ [INTERRUPT] Candidate started speaking"
                             print(msg_log); await push_log(msg_log)
 
-                        _speech_buffer = ""
+                        last_speech_time = asyncio.get_event_loop().time()\n                        _speech_buffer = ""
                         msg = "🎤 [SPEECH STARTED] Candidate speaking..."
                         print(msg); await push_log(msg)
                         return
@@ -678,6 +678,7 @@ async def join_meeting_and_transcribe(
 
             speaking_watcher_task = asyncio.create_task(_watch_bot_speaking())
 
+            # 10-minute inactivity timeout (resets when candidate speaks)\n            INACTIVITY_TIMEOUT = 600  # 10 minutes\n            last_speech_time = asyncio.get_event_loop().time()\n\n            async def _check_inactivity():\n                """Leave meeting if no candidate speech for 10 minutes."""\n                nonlocal last_speech_time\n                try:\n                    while True:\n                        await asyncio.sleep(60)  # Check every minute\n                        elapsed = asyncio.get_event_loop().time() - last_speech_time\n                        if elapsed > INACTIVITY_TIMEOUT:\n                            msg = f"⏰ Meeting TIMEOUT ({INACTIVITY_TIMEOUT}s) — no candidate speech"\n                            print(msg); await push_log(msg)\n                            # Mark as completed\n                            if db:\n                                await db.interviews.update_one(\n                                    {"interview_id": interview_id},\n                                    {"\$set": {\n                                        "status": "completed",\n                                        "ended_at": datetime.utcnow(),\n                                        "abandon_reason": f"inactivity_timeout ({INACTIVITY_TIMEOUT}s)"\n                                    }}\n                                )\n                            # Cancel leave task to trigger cleanup\n                            if leave_task and not leave_task.done():\n                                leave_task.cancel()\n                            return\n                except asyncio.CancelledError:\n                    pass\n                except Exception as e:\n                    msg = f"⚠️  Inactivity checker error: {e}"\n                    print(msg); await push_log(msg)\n\n            inactivity_task = asyncio.create_task(_check_inactivity())\n
             # Run meeting monitor and leave watcher concurrently
             leave_task = asyncio.create_task(
                 _watch_for_leave(interview_id, page)
