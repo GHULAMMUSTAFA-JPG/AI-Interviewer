@@ -31,6 +31,7 @@ from src.config import (
     GEMINI_MAX_OUTPUT_TOKENS_COMBINED,
     GEMINI_TEMPERATURE,
     GEMINI_TOP_P,
+    GEMINI_ENABLE_STREAMING,
     RETRY_MAX_ATTEMPTS,
     RETRY_WAIT_MIN,
     RETRY_WAIT_MAX
@@ -116,17 +117,35 @@ class GeminiProvider(LLMProvider):
         start_time = time.perf_counter()
         logger_struct.info("llm_call", call_num=call_num, model=self.model)
         try:
-            response = await self.client.aio.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS,
-                    temperature=GEMINI_TEMPERATURE,
-                    top_p=GEMINI_TOP_P
-                )
-            )
+            # Use streaming if enabled for faster first-token delivery
+            if GEMINI_ENABLE_STREAMING:
+                full_text = ""
+                async for chunk in await self.client.aio.models.generate_content_stream(
+                    model=self.model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS,
+                        temperature=GEMINI_TEMPERATURE,
+                        top_p=GEMINI_TOP_P
+                    )
+                ):
+                    if chunk.text:
+                        full_text += chunk.text
 
-            if not response.text:
+                response_text = full_text
+            else:
+                response = await self.client.aio.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS,
+                        temperature=GEMINI_TEMPERATURE,
+                        top_p=GEMINI_TOP_P
+                    )
+                )
+                response_text = response.text
+
+            if not response_text:
                 raise LLMException("Gemini returned empty response")
 
             latency_ms = (time.perf_counter() - start_time) * 1000
@@ -134,10 +153,10 @@ class GeminiProvider(LLMProvider):
                 "llm_call_success",
                 call_num=call_num,
                 latency_ms=round(latency_ms, 2),
-                response_length=len(response.text),
+                response_length=len(response_text),
                 model=self.model
             )
-            return response.text
+            return response_text
 
         except Exception as e:
             latency_ms = (time.perf_counter() - start_time) * 1000

@@ -63,11 +63,12 @@ TARGET_CACHE_HIT_RATE = 0.99  # 99%
 
 # LLM Configuration — all values controlled via .env
 GEMINI_MODEL_CONVERSATION = os.getenv("GEMINI_MODEL_CONVERSATION", "gemini-2.0-flash")
-GEMINI_MODEL_EVALUATION = os.getenv("GEMINI_MODEL_EVALUATION", "gemini-1.5-pro")
-GEMINI_MAX_OUTPUT_TOKENS          = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "200"))
+GEMINI_MODEL_EVALUATION = os.getenv("GEMINI_MODEL_EVALUATION", "gemini-2.0-flash")
+GEMINI_MAX_OUTPUT_TOKENS          = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "300"))
 GEMINI_MAX_OUTPUT_TOKENS_COMBINED = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS_COMBINED", "400"))
 GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0.7"))
 GEMINI_TOP_P = float(os.getenv("GEMINI_TOP_P", "0.9"))
+GEMINI_ENABLE_STREAMING = os.getenv("GEMINI_ENABLE_STREAMING", "true").lower() == "true"
 
 # Retry Configuration (Tenacity)
 RETRY_MAX_ATTEMPTS = 3
