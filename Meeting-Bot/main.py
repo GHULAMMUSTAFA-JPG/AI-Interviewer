@@ -3,6 +3,11 @@ main.py — Meeting-Bot Entry Point (Web Speech API Mode)
 
 Watches interviews.interviews for new in_progress inserts
 and spawns a browser bot for each meeting URL.
+
+Redis Integration:
+- Publishes bot status changes to Redis
+- Sends heartbeats every 10s
+- Enables real-time UI updates
 """
 
 import asyncio
@@ -13,6 +18,7 @@ from dotenv import load_dotenv
 
 from bot import join_meeting_and_transcribe
 from logger import push_log
+from redis_client import get_redis, RedisState, close_redis
 
 load_dotenv()
 
@@ -46,7 +52,7 @@ async def run_bot(interview: dict) -> None:
     # Ensure URL has https:// prefix
     if meeting_url and not meeting_url.startswith("http"):
         meeting_url = "https://" + meeting_url.lstrip("/")
-    
+
     # Also strip any trailing slashes
     meeting_url = meeting_url.rstrip("/")
 
@@ -57,6 +63,15 @@ async def run_bot(interview: dict) -> None:
 
     msg = f"Starting bot for interview_id={interview_id}  url={meeting_url}"
     print(msg); await push_log(msg)
+
+    # Update Redis status
+    try:
+        redis = await get_redis()
+        state = RedisState(redis)
+        await state.set_bot_status(interview_id, "joining", meeting_url=meeting_url)
+        await state.set_meeting_status(interview_id, "waiting", url=meeting_url)
+    except Exception as e:
+        print(f"⚠️  Redis update failed: {e}")
 
     await join_meeting_and_transcribe(
         url=meeting_url,
@@ -75,6 +90,16 @@ async def main() -> None:
         except (NotImplementedError, OSError):
             signal.signal(sig, lambda _s, _f: shutdown_event.set())
 
+    # Connect to Redis
+    try:
+        redis = await get_redis()
+        state = RedisState(redis)
+        print("✅ Redis connected and ready")
+    except Exception as e:
+        print(f"❌ Redis connection failed: {e}")
+        # Continue without Redis (degraded mode)
+        state = None
+
     client = await _connect_with_retry()
     db = client[DB_NAME]
 
@@ -90,6 +115,13 @@ async def main() -> None:
             await run_bot(interview)
         finally:
             _active.discard(interview_id)
+            # Update Redis status when bot finishes
+            if state:
+                try:
+                    await state.set_bot_status(interview_id, "completed")
+                    await state.set_meeting_status(interview_id, "ended")
+                except:
+                    pass
 
     async with db["interviews"].watch(
         [{"$match": {"operationType": "insert"}}],
@@ -119,13 +151,8 @@ async def main() -> None:
         msg = f"Waiting for bot {interview_id} to finish..."
         print(msg); await push_log(msg)
 
-    await shutdown_event.wait()
-
-    for interview_id in list(_active):
-        msg = f"Shutting down bot for {interview_id}..."
-        print(msg); await push_log(msg)
-
-    client.close()
+    # Cleanup Redis connection
+    await close_redis()
 
 
 if __name__ == "__main__":

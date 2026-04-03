@@ -22,11 +22,26 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
+from redis_client import get_redis, RedisState
 
 load_dotenv()
 
 MONGO_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
 DB_NAME = "interviews"
+
+# Redis client (lazy initialization)
+_redis_state = None
+
+async def get_redis_state():
+    """Get or create Redis state helper."""
+    global _redis_state
+    if _redis_state is None:
+        try:
+            redis = await get_redis()
+            _redis_state = RedisState(redis)
+        except:
+            pass  # Redis not available, will use MongoDB
+    return _redis_state
 
 app = FastAPI(title="AI Interviewer")
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -124,7 +139,26 @@ async def stop_interview(interview_id: str = Path(...)):
 
 @app.get("/status/{interview_id}")
 async def interview_status(interview_id: str = Path(...)):
-    """Return current status of an interview (for UI polling)."""
+    """Return current status of an interview (Redis-first for instant updates)."""
+    # Try Redis first (instant, real-time)
+    state = await get_redis_state()
+    if state:
+        try:
+            bot_status = await state.get_bot_status(interview_id)
+            meeting_status = await state.get_meeting_status(interview_id)
+            
+            if bot_status or meeting_status:
+                return JSONResponse({
+                    "status": meeting_status.get("status", "unknown"),
+                    "bot_status": bot_status.get("status", "pending"),
+                    "source": "redis",  # For debugging
+                    **bot_status,
+                    **meeting_status
+                })
+        except:
+            pass  # Fall back to MongoDB
+    
+    # Fallback to MongoDB
     db = _get_db()
     doc = await db["interviews"].find_one(
         {"interview_id": interview_id},
@@ -135,6 +169,7 @@ async def interview_status(interview_id: str = Path(...)):
     return JSONResponse({
         "status": doc.get("status"),
         "bot_status": doc.get("bot_status", "pending"),
+        "source": "mongodb"  # For debugging
     })
 
 
