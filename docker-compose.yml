@@ -21,6 +21,34 @@
 
 services:
 
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Redis 7 — Real-time state management, pub/sub, caching, and queues.
+  # Used for:
+  #   - Bot & meeting state management (instant status updates)
+  #   - Pub/sub events (real-time notifications)
+  #   - Caching (reduce MongoDB load)
+  #   - Task queues (TTS, STT jobs)
+  #   - Heartbeat monitoring (detect dead bots)
+  # ─────────────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"       # EXPOSED - Connect Redis CLI to localhost:6379
+    volumes:
+      - redis_data:/data
+    networks:
+      - interview-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
   # ────────────────────────────────────────────────────────────────
   # MongoDB 7 with single-node replica set.
   # Change streams (used by all services) require a replica set.
@@ -177,6 +205,7 @@ services:
 # ══════════════════════════════════════════════════════════════════════
 volumes:
   mongodb_data:
+  redis_data:        # Redis persistent data (AOF)
   meeting_bot_recordings:
   pulse-socket:      # Shared between meeting-bot (PulseAudio server) and tts (client)
   chrome_profile:    # Persistent Chrome profile (login, cookies) across container restarts
