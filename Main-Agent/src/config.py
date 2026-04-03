@@ -68,7 +68,6 @@ GEMINI_MAX_OUTPUT_TOKENS          = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "3
 GEMINI_MAX_OUTPUT_TOKENS_COMBINED = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS_COMBINED", "400"))
 GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0.7"))
 GEMINI_TOP_P = float(os.getenv("GEMINI_TOP_P", "0.9"))
-GEMINI_ENABLE_STREAMING = os.getenv("GEMINI_ENABLE_STREAMING", "true").lower() == "true"
 
 # Retry Configuration (Tenacity)
 RETRY_MAX_ATTEMPTS = 3
