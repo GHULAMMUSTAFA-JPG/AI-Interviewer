@@ -4,7 +4,7 @@ Interview Cleanup Service - Watchdog Supervisor with Redis Heartbeats
 Runs every 10 seconds to detect and recover stuck interviews.
 
 Detects stuck interviews via:
-- Redis heartbeat timeout (> 60 seconds since last heartbeat)
+- Redis heartbeat timeout (> 30 seconds since last heartbeat)
 - Interview duration timeout (> 2 hours total)
 - No heartbeat ever sent (bot crashed before first heartbeat)
 
@@ -28,8 +28,9 @@ from redis_client import get_redis, RedisState, close_redis
 MONGO_URI = os.getenv("MONGODB_URI", "mongodb://host.docker.internal:27017/?replicaSet=rs0")
 DB_NAME = os.getenv("MONGODB_DB", "interviews")
 
-# Timeouts
-HEARTBEAT_TIMEOUT_SECONDS = 60  # 60 seconds (using Redis heartbeats)
+# Timeouts - PRODUCTION TUNED
+HEARTBEAT_INTERVAL = 10  # Bot sends heartbeat every 10 seconds
+HEARTBEAT_TIMEOUT_SECONDS = 30  # 3x heartbeat interval (30 seconds)
 MAX_INTERVIEW_DURATION_MINUTES = 120
 CLEANUP_INTERVAL_SECONDS = 10  # Run every 10 seconds for fast detection
 
@@ -40,12 +41,22 @@ _redis_state = None
 
 
 async def get_db():
-    """Get or create MongoDB client (singleton pattern)."""
+    """Get or create MongoDB client (singleton pattern) with retry."""
     global _client, _db
     if _client is None:
-        _client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-        await _client.admin.command("ping")
-        _db = _client[DB_NAME]
+        for attempt in range(10):
+            try:
+                _client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+                await _client.admin.command("ping")
+                _db = _client[DB_NAME]
+                print(f"✅ MongoDB connected: {MONGO_URI}")
+                return _db
+            except Exception as e:
+                if attempt == 9:
+                    raise
+                wait = min(2 ** attempt, 10)
+                print(f"⚠️  MongoDB connection failed (attempt {attempt+1}/10), retrying in {wait}s: {e}")
+                await asyncio.sleep(wait)
     return _db
 
 
@@ -157,11 +168,12 @@ async def cleanup_stuck_interviews():
 async def main():
     """Run cleanup service continuously."""
     print("🧹 Starting Interview Cleanup Service (Redis-enabled)")
+    print(f"   Heartbeat interval: {HEARTBEAT_INTERVAL} seconds")
     print(f"   Heartbeat timeout: {HEARTBEAT_TIMEOUT_SECONDS} seconds (Redis)")
     print(f"   Max interview duration: {MAX_INTERVIEW_DURATION_MINUTES} minutes")
     print(f"   Cleanup interval: {CLEANUP_INTERVAL_SECONDS} seconds")
 
-    # Initialize MongoDB
+    # Initialize MongoDB with retry
     try:
         await get_db()
         print("✅ Connected to MongoDB")
@@ -169,16 +181,23 @@ async def main():
         print(f"❌ Failed to connect to MongoDB: {e}")
         return
 
-    # Initialize Redis
+    # Initialize Redis with retry
     global _redis_state
-    try:
-        redis = await get_redis()
-        _redis_state = RedisState(redis)
-        print("✅ Connected to Redis (heartbeat monitoring enabled)")
-    except Exception as e:
-        print(f"⚠️  Redis connection failed: {e}")
-        print("   Running in MongoDB-only mode (slower detection)")
-        _redis_state = None
+    for attempt in range(10):
+        try:
+            redis = await get_redis()
+            _redis_state = RedisState(redis)
+            print("✅ Connected to Redis (heartbeat monitoring enabled)")
+            break
+        except Exception as e:
+            if attempt == 9:
+                print(f"❌ Redis connection failed after {attempt+1} attempts: {e}")
+                print("   Running in MongoDB-only mode (slower detection)")
+                _redis_state = None
+            else:
+                wait = min(2 ** attempt, 10)
+                print(f"⚠️  Redis connection failed (attempt {attempt+1}/10), retrying in {wait}s: {e}")
+                await asyncio.sleep(wait)
 
     while True:
         try:
@@ -194,3 +213,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
