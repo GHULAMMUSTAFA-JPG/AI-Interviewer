@@ -30,7 +30,7 @@ DB_NAME = os.getenv("MONGODB_DB", "interviews")
 
 # Timeouts - PRODUCTION TUNED
 HEARTBEAT_INTERVAL = 10  # Bot sends heartbeat every 10 seconds
-HEARTBEAT_TIMEOUT_SECONDS = 30  # 3x heartbeat interval (30 seconds)
+HEARTBEAT_TIMEOUT_SECONDS = 90  # 9x heartbeat interval (graceful for network jitter)
 MAX_INTERVIEW_DURATION_MINUTES = 120
 CLEANUP_INTERVAL_SECONDS = 10  # Run every 10 seconds for fast detection
 

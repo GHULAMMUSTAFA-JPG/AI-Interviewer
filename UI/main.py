@@ -119,6 +119,7 @@ async def start_interview(
 
     await db["interviews"].insert_one(doc)
 
+    # Return JSON for AJAX usage
     return JSONResponse({"status": "started", "interview_id": interview_id})
 
 
@@ -146,7 +147,7 @@ async def interview_status(interview_id: str = Path(...)):
         try:
             bot_status = await state.get_bot_status(interview_id)
             meeting_status = await state.get_meeting_status(interview_id)
-            
+
             if bot_status or meeting_status:
                 return JSONResponse({
                     "status": meeting_status.get("status", "unknown"),
@@ -157,7 +158,7 @@ async def interview_status(interview_id: str = Path(...)):
                 })
         except:
             pass  # Fall back to MongoDB
-    
+
     # Fallback to MongoDB
     db = _get_db()
     doc = await db["interviews"].find_one(
@@ -193,11 +194,11 @@ async def logs_page(request: Request):
 async def get_logs(service: str, lines: int = 100):
     """
     Fetch logs from Docker for a specific service.
-    
+
     Args:
         service: Service name (cleanup-service, meeting-bot, etc.)
         lines: Number of log lines to fetch (default: 100)
-    
+
     Returns:
         JSON with log lines as array of strings
     """
@@ -210,13 +211,13 @@ async def get_logs(service: str, lines: int = 100):
         "mongodb",
         "ui",
     }
-    
+
     if service not in ALLOWED_SERVICES:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid service. Must be one of: {', '.join(ALLOWED_SERVICES)}"
         )
-    
+
     try:
         # Run docker compose logs command
         result = subprocess.run(
@@ -226,7 +227,7 @@ async def get_logs(service: str, lines: int = 100):
             timeout=10,  # Timeout after 10 seconds
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         )
-        
+
         if result.returncode != 0:
             # Return error message as log line
             return JSONResponse({
@@ -234,7 +235,7 @@ async def get_logs(service: str, lines: int = 100):
                 "lines": [f"Error fetching logs: {result.stderr.strip()}"],
                 "error": True
             })
-        
+
         # Parse log output (format: "service-name  |  log message")
         log_lines = []
         for line in result.stdout.splitlines():
@@ -243,13 +244,13 @@ async def get_logs(service: str, lines: int = 100):
                 log_lines.append(line.split("  |  ", 1)[1])
             elif line.strip():
                 log_lines.append(line)
-        
+
         return JSONResponse({
             "service": service,
             "lines": log_lines,
             "error": False
         })
-        
+
     except subprocess.TimeoutExpired:
         return JSONResponse({
             "service": service,
@@ -290,10 +291,29 @@ async def view_conversation(request: Request, interview_id: str = Path(...)):
 
     messages = await db["transcripts"].find(
         {"interview_id": interview_id},
-        {"speaker": 1, "text": 1, "timestamp": 1, "_id": 0},
+        {"speaker": 1, "text": 1, "timestamp": 1, "audio_url": 1, "_id": 1},
     ).sort("timestamp", 1).to_list(length=None)
 
     return templates.TemplateResponse(
         "conversation.html",
         {"request": request, "interview": interview, "messages": messages},
     )
+
+
+@app.get("/api/audio/{file_id}")
+async def serve_audio(file_id: str = Path(...)):
+    """Serve audio file from GridFS for playback in the UI."""
+    import gridfs
+    from bson import ObjectId
+    db = _get_db()
+    fs = gridfs.GridFS(db, collection='audio')
+    try:
+        data = fs.get(ObjectId(file_id)).read()
+        from fastapi.responses import Response
+        # Determine content type based on file extension in GridFS metadata
+        file_doc = db['audio.files'].find_one({"_id": ObjectId(file_id)})
+        filename = file_doc.get('filename', '') if file_doc else ''
+        content_type = 'audio/mpeg' if filename.endswith('.mp3') else 'audio/wav'
+        return Response(content=data, media_type=content_type)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Audio not found: {e}")

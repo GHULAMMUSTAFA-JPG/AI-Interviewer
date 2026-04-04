@@ -53,6 +53,41 @@
   .ts { font-size: 0.72em; color: #aaa; margin-top: 3px; }
   .empty { color: #888; text-align: center; margin: 40px 0; }
 
+  /* Audio player styles */
+  .audio-container {
+    margin-top: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .audio-btn {
+    background: rgba(255,255,255,0.2);
+    border: 1px solid rgba(255,255,255,0.3);
+    color: #fff;
+    padding: 4px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.75em;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .audio-btn:hover {
+    background: rgba(255,255,255,0.3);
+  }
+  .audio-btn.playing {
+    background: rgba(40, 167, 69, 0.3);
+    border-color: rgba(40, 167, 69, 0.5);
+  }
+  .candidate .audio-btn {
+    background: rgba(30, 58, 95, 0.1);
+    border: 1px solid rgba(30, 58, 95, 0.2);
+    color: #1e3a5f;
+  }
+  .candidate .audio-btn:hover {
+    background: rgba(30, 58, 95, 0.2);
+  }
+
   {% if interview.status == 'in_progress' %}
   .live-badge {
     display: inline-block;
@@ -107,6 +142,46 @@ async function stopInterview() {
     alert('Error: ' + e.message);
   }
 }
+
+// Audio playback
+let currentAudio = null;
+let currentBtn = null;
+
+async function playAudio(fileId, btn) {
+  // Stop any currently playing audio
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio = null;
+  }
+  if (currentBtn) {
+    currentBtn.classList.remove('playing');
+    currentBtn.innerHTML = '▶ Play';
+  }
+
+  const audioUrl = `/api/audio/${fileId}`;
+  const audio = new Audio(audioUrl);
+  currentAudio = audio;
+  currentBtn = btn;
+
+  btn.classList.add('playing');
+  btn.innerHTML = '⏸ Playing...';
+
+  audio.onended = () => {
+    btn.classList.remove('playing');
+    btn.innerHTML = '▶ Play';
+    currentAudio = null;
+    currentBtn = null;
+  };
+
+  audio.onerror = () => {
+    btn.classList.remove('playing');
+    btn.innerHTML = '▶ Play';
+    currentAudio = null;
+    currentBtn = null;
+  };
+
+  await audio.play();
+}
 </script>
 
 <div class="chat">
@@ -117,6 +192,13 @@ async function stopInterview() {
   <div class="msg {{ m.speaker }}">
     <div>
       <div class="bubble">{{ m.text }}</div>
+      {% if m.speaker == 'agent' and m.audio_url and m.audio_url != 'played' %}
+      <div class="audio-container">
+        <button class="audio-btn" onclick="playAudio('{{ m.audio_url }}', this)">
+          ▶ Play
+        </button>
+      </div>
+      {% endif %}
       <div class="ts">{{ m.timestamp.strftime('%H:%M:%S') if m.timestamp else '' }}</div>
     </div>
     <div class="speaker">{{ m.speaker | upper }}</div>

@@ -1,199 +1,151 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI Interviewer</title>
-  <link rel="stylesheet" href="/static/style.css" />
+<meta charset="UTF-8">
+<title>AI Interviewer</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 540px; margin: 40px auto; padding: 0 20px; background: #f5f7fa; color: #333; }
+  h1 { font-size: 1.6em; margin-bottom: 4px; color: #1e3a5f; }
+  p.sub { color: #666; margin-bottom: 24px; font-size: 0.9em; }
+  label { display: block; margin-top: 14px; font-size: 0.9em; font-weight: 500; }
+  input[type=text], input[type=url], textarea, input[type=file] {
+    width: 100%; padding: 8px; margin-top: 4px;
+    border: 1px solid #ccc; border-radius: 6px; font-size: 0.9em; box-sizing: border-box;
+  }
+  textarea { height: 80px; resize: vertical; }
+  button {
+    margin-top: 20px; padding: 10px 20px; background: #1e3a5f; color: #fff;
+    border: none; border-radius: 6px; cursor: pointer; font-size: 1em;
+  }
+  button:hover { background: #2a5a8f; }
+  .status {
+    margin-top: 20px; padding: 16px; background: #fff; border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1); display: none;
+  }
+  .status h2 { margin: 0 0 8px; font-size: 1.1em; color: #1e3a5f; }
+  .status .detail { font-size: 0.85em; color: #666; }
+  .status .badge {
+    display: inline-block; padding: 3px 10px; border-radius: 12px;
+    font-size: 0.8em; font-weight: 500;
+  }
+  .in_progress { background: #d4edda; color: #155724; }
+  .admitted    { background: #cce5ff; color: #004085; }
+  .waiting     { background: #fff3cd; color: #856404; }
+  .ended       { background: #f8d7da; color: #721c24; }
+  .stop-btn {
+    margin-top: 12px; padding: 8px 16px; background: #dc3545; color: #fff;
+    border: none; border-radius: 6px; cursor: pointer; font-size: 0.9em;
+  }
+  .stop-btn:hover { background: #c82333; }
+  .logs {
+    margin-top: 12px; padding: 10px; background: #f8f9fa; border-radius: 6px;
+    font-family: monospace; font-size: 0.8em; max-height: 200px; overflow-y: auto;
+    white-space: pre-wrap; word-break: break-all;
+  }
+</style>
 </head>
 <body>
-  <div class="container">
-    <h1>AI Interviewer</h1>
-    <p class="subtitle">Fill in the details below and click <strong>Start Interview</strong> to launch the session.</p>
-    <div style="margin-bottom:1.5rem;">
-      <a href="/conversations" style="display:inline-block;padding:0.4rem 1rem;background:#2563eb;color:#fff;border-radius:6px;text-decoration:none;font-size:0.9rem;margin-right:10px;">View Conversations</a>
-      <a href="/logs" style="display:inline-block;padding:0.4rem 1rem;background:#28a745;color:#fff;border-radius:6px;text-decoration:none;font-size:0.9rem;">📋 System Logs</a>
-    </div>
+<h1>AI Interviewer</h1>
+<p class="sub">Fill in the details to start a new interview session.</p>
 
-    <form id="interviewForm">
-      <div class="field">
-        <label for="meeting_url">Google Meet URL</label>
-        <input
-          type="text"
-          id="meeting_url"
-          name="meeting_url"
-          placeholder="https://meet.google.com/xxx-yyy-zzz"
-          required
-        />
-      </div>
+<form id="interviewForm">
+  <label for="meeting_url">Google Meet URL</label>
+  <input type="url" id="meeting_url" name="meeting_url"
+         placeholder="https://meet.google.com/xxx-xxxx-xxx" required>
 
-      <div class="field">
-        <label for="job_description">Job Description</label>
-        <textarea
-          id="job_description"
-          name="job_description"
-          rows="5"
-          placeholder="Paste the job description here..."
-          required
-        ></textarea>
-      </div>
+  <label for="job_description">Job Description</label>
+  <textarea id="job_description" name="job_description" required></textarea>
 
-      <div class="field">
-        <label for="company_info">Company Info</label>
-        <textarea
-          id="company_info"
-          name="company_info"
-          rows="4"
-          placeholder="Brief overview of the company, culture, tech stack..."
-          required
-        ></textarea>
-      </div>
+  <label for="company_info">Company Info</label>
+  <textarea id="company_info" name="company_info" required></textarea>
 
-      <div class="field">
-        <label for="candidate_cv">Candidate CV <span class="hint">(PDF or DOCX)</span></label>
-        <input
-          type="file"
-          id="candidate_cv"
-          name="candidate_cv"
-          accept=".pdf,.docx"
-          required
-        />
-      </div>
+  <label for="candidate_cv">Candidate CV (PDF or DOCX)</label>
+  <input type="file" id="candidate_cv" name="candidate_cv" accept=".pdf,.docx" required>
 
-      <button type="submit" id="submitBtn">Start Interview</button>
-    </form>
+  <button type="submit">Start Interview</button>
+</form>
 
-    <div id="result" class="result hidden"></div>
-    
-    <div id="botStatus" class="bot-status hidden">
-      <div class="status-indicator">
-        <span class="status-dot"></span>
-        <span class="status-text">Waiting for bot to join...</span>
-      </div>
-    </div>
-  </div>
+<div class="status" id="statusBox">
+  <h2 id="statusTitle">Interview started</h2>
+  <div class="detail" id="statusDetail"></div>
+  <div class="logs" id="logBox"></div>
+  <button class="stop-btn" id="stopBtn" onclick="stopInterview()">⏹ End Interview</button>
+  <p style="margin-top:12px;font-size:0.85em;">
+    <a href="/conversations">View all interviews →</a>
+  </p>
+</div>
 
-  <script>
-    const form = document.getElementById('interviewForm');
-    const result = document.getElementById('result');
-    const btn = document.getElementById('submitBtn');
-    const botStatus = document.getElementById('botStatus');
-    let currentInterviewId = null;
+<script>
+let currentInterviewId = null;
+let pollingInterval = null;
 
-    // Persist text fields across reloads
-    const PERSIST_FIELDS = ['meeting_url', 'job_description', 'company_info'];
-    PERSIST_FIELDS.forEach(id => {
-      const el = document.getElementById(id);
-      const saved = localStorage.getItem('ai_interviewer_' + id);
-      if (saved) el.value = saved;
-      el.addEventListener('input', () => localStorage.setItem('ai_interviewer_' + id, el.value));
-    });
+document.getElementById('interviewForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = document.getElementById('interviewForm');
+  const formData = new FormData(form);
 
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      btn.disabled = true;
-      btn.textContent = 'Starting...';
-      result.className = 'result hidden';
-      botStatus.classList.add('hidden');
+  const btn = form.querySelector('button[type=submit]');
+  btn.disabled = true;
+  btn.textContent = 'Starting...';
 
-      const data = new FormData(form);
+  try {
+    const res = await fetch('/start', { method: 'POST', body: formData });
+    const data = await res.json();
+    if (data.status === 'started') {
+      currentInterviewId = data.interview_id;
+      document.getElementById('statusBox').style.display = 'block';
+      document.getElementById('statusTitle').textContent = 'Interview started';
+      document.getElementById('statusDetail').innerHTML =
+        `ID: <code>${data.interview_id}</code><br>Waiting for bot to join...`;
+      startPolling();
+    }
+  } catch (err) {
+    alert('Error: ' + err.message);
+    btn.disabled = false;
+    btn.textContent = 'Start Interview';
+  }
+});
 
-      try {
-        const res = await fetch('/start', { method: 'POST', body: data });
-        const json = await res.json();
+function startPolling() {
+  if (pollingInterval) clearInterval(pollingInterval);
+  pollingInterval = setInterval(async () => {
+    if (!currentInterviewId) return;
+    try {
+      const res = await fetch(`/status/${currentInterviewId}`);
+      const data = await res.json();
+      const detail = document.getElementById('statusDetail');
+      const botStatus = data.bot_status || data.status || 'unknown';
+      const meetingStatus = data.status || 'unknown';
 
-        if (json.status === 'started') {
-          currentInterviewId = json.interview_id;
-          btn.disabled = true;
-          btn.textContent = 'Interview in Progress';
-          result.className = 'result success';
-          result.innerHTML = `
-            <strong>Interview started!</strong><br/>
-            Interview ID: <code>${json.interview_id}</code><br/><br/>
-            <button id="leaveBtn" class="leave-btn" onclick="leaveInterview()">Leave Meeting</button>
-          `;
-          // Show bot status
-          botStatus.classList.remove('hidden');
-          startStatusPolling(json.interview_id);
-        } else {
-          throw new Error(JSON.stringify(json));
-        }
-      } catch (err) {
-        result.className = 'result error';
-        result.textContent = `Error: ${err.message}`;
-        btn.disabled = false;
-        btn.textContent = 'Start Interview';
+      detail.innerHTML = `
+        Bot: <span class="badge ${botStatus}">${botStatus}</span><br>
+        Meeting: <span class="badge ${meetingStatus}">${meetingStatus}</span><br>
+        <small>Updated: ${new Date().toLocaleTimeString()}</small>
+      `;
+
+      if (meetingStatus === 'ended' || meetingStatus === 'abandoned' || botStatus === 'completed') {
+        clearInterval(pollingInterval);
+        detail.innerHTML += '<br><strong>Interview ended.</strong>';
+        document.getElementById('stopBtn').style.display = 'none';
       }
-    });
-
-    let _statusPoller = null;
-
-    function startStatusPolling(interviewId) {
-      _statusPoller = setInterval(async () => {
-        try {
-          const res = await fetch(`/status/${interviewId}`);
-          if (!res.ok) return;
-          const json = await res.json();
-          
-          // Update bot status text
-          const statusText = botStatus.querySelector('.status-text');
-          const statusDot = botStatus.querySelector('.status-dot');
-          
-          // Check status FIRST (meeting ended takes priority)
-          if (json.status === 'abandoned' || json.status === 'completed') {
-            statusText.textContent = 'Meeting ended';
-            statusDot.className = 'status-dot ended';
-            stopStatusPolling();
-            resetForm();
-            return;
-          }
-          
-          // Then check bot_status
-          if (json.bot_status === 'pending') {
-            statusText.textContent = 'Bot joining meeting...';
-            statusDot.className = 'status-dot pending';
-          } else if (json.bot_status === 'admitted') {
-            statusText.textContent = 'Bot in meeting - Ready!';
-            statusDot.className = 'status-dot ready';
-          }
-        } catch (_) { /* ignore network blips */ }
-      }, 2000);
+    } catch (e) {
+      console.error('Polling error:', e);
     }
+  }, 3000);
+}
 
-    function stopStatusPolling() {
-      if (_statusPoller) { clearInterval(_statusPoller); _statusPoller = null; }
-    }
-
-    function resetForm() {
-      currentInterviewId = null;
-      btn.disabled = false;
-      btn.textContent = 'Start Interview';
-      result.className = 'result hidden';
-      botStatus.classList.add('hidden');
-    }
-
-    async function leaveInterview() {
-      if (!currentInterviewId) return;
-      const leaveBtn = document.getElementById('leaveBtn');
-      leaveBtn.disabled = true;
-      leaveBtn.textContent = 'Leaving...';
-      try {
-        const res = await fetch(`/stop/${currentInterviewId}`, { method: 'POST' });
-        const json = await res.json();
-        if (json.status === 'stopped') {
-          stopStatusPolling();
-          leaveBtn.textContent = 'Left Meeting';
-          leaveBtn.classList.add('left');
-          currentInterviewId = null;
-          btn.disabled = false;
-          btn.textContent = 'Start Interview';
-        }
-      } catch (err) {
-        leaveBtn.disabled = false;
-        leaveBtn.textContent = 'Leave Meeting';
-        alert(`Error: ${err.message}`);
-      }
-    }
-  </script>
+async function stopInterview() {
+  if (!currentInterviewId) return;
+  if (!confirm('End this interview?')) return;
+  try {
+    await fetch(`/stop/${currentInterviewId}`, { method: 'POST' });
+    document.getElementById('statusDetail').innerHTML += '<br><strong>Interview ended by user.</strong>';
+    document.getElementById('stopBtn').style.display = 'none';
+    if (pollingInterval) clearInterval(pollingInterval);
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+</script>
 </body>
 </html>
