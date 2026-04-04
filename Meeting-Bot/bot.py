@@ -286,17 +286,20 @@ async def join_meeting_and_transcribe(
 
     async with async_playwright() as p:
         try:
-            # FIX: Remove stale Chrome SingletonLock file (prevents "ProcessSingleton" errors)
+            # FIX: Remove stale Chrome lock files (prevents "ProcessSingleton" errors)
+            # Chrome creates 3 lock files: SingletonLock, SingletonCookie, SingletonSocket
+            # These persist across container restarts and block new Chrome launches
             chrome_profile_dir = "/app/chrome_profile"
-            lock_file = Path(chrome_profile_dir) / "SingletonLock"
-            if lock_file.exists():
-                try:
-                    lock_file.unlink()
-                    msg = f"🔧 Removed stale Chrome lock file: {lock_file}"
-                    print(msg); await push_log(msg)
-                except Exception as e:
-                    msg = f"⚠️  Failed to remove lock file: {e} (will try anyway)"
-                    print(msg); await push_log(msg)
+            for lock_name in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
+                lock_file = Path(chrome_profile_dir) / lock_name
+                if lock_file.exists() or lock_file.is_symlink():
+                    try:
+                        lock_file.unlink()
+                        msg = f"🔧 Removed stale Chrome lock file: {lock_name}"
+                        print(msg); await push_log(msg)
+                    except Exception as e:
+                        msg = f"⚠️  Failed to remove {lock_name}: {e} (will try anyway)"
+                        print(msg); await push_log(msg)
 
             msg = "🌐 Launching Chromium (with persistent profile)..."
             print(msg); await push_log(msg)
