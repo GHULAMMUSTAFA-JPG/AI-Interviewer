@@ -141,13 +141,15 @@ class TTSService:
 
     async def _maybe_resume(self, interview_id: str, text: str, interrupted_at: datetime) -> None:
         """
-        After a TTS interrupt, wait 12s for the candidate to say something
+        After a TTS interrupt, wait 30s for the candidate to say something
         meaningful. If no new agent transcript appears (meaning the pipeline
         never fired), re-insert the interrupted text so TTS plays it again.
         Prevents the conversation deadlocking when a false/brief interrupt
         fires but the candidate had nothing to say.
+
+        30s wait accounts for LLM call latency (Gemini can take 10-20s).
         """
-        RESUME_WAIT_SEC = 12.0
+        RESUME_WAIT_SEC = 30.0
         await asyncio.sleep(RESUME_WAIT_SEC)
         try:
             db = self._mongo_client[config.mongodb_db]

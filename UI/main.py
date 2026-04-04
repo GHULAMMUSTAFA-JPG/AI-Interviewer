@@ -152,26 +152,32 @@ async def interview_status(interview_id: str = Path(...)):
                 return JSONResponse({
                     "status": meeting_status.get("status", "unknown"),
                     "bot_status": bot_status.get("status", "pending"),
-                    "source": "redis",  # For debugging
+                    "source": "redis",
                     **bot_status,
                     **meeting_status
                 })
-        except:
-            pass  # Fall back to MongoDB
+        except Exception as redis_err:
+            print(f"⚠️  Redis status error for {interview_id}: {redis_err}")
+            # Fall through to MongoDB
 
     # Fallback to MongoDB
-    db = _get_db()
-    doc = await db["interviews"].find_one(
-        {"interview_id": interview_id},
-        {"status": 1, "bot_status": 1, "_id": 0},
-    )
-    if not doc:
-        raise HTTPException(status_code=404, detail="Interview not found")
-    return JSONResponse({
-        "status": doc.get("status"),
-        "bot_status": doc.get("bot_status", "pending"),
-        "source": "mongodb"  # For debugging
-    })
+    try:
+        db = _get_db()
+        doc = await db["interviews"].find_one(
+            {"interview_id": interview_id},
+            {"status": 1, "bot_status": 1, "_id": 0},
+        )
+        if not doc:
+            raise HTTPException(status_code=404, detail="Interview not found")
+        return JSONResponse({
+            "status": doc.get("status"),
+            "bot_status": doc.get("bot_status", "pending"),
+            "source": "mongodb"
+        })
+    except HTTPException:
+        raise
+    except Exception as mongo_err:
+        raise HTTPException(status_code=500, detail=f"Status check failed: {mongo_err}")
 
 
 @app.get("/logs", response_class=HTMLResponse)
@@ -305,15 +311,35 @@ async def serve_audio(file_id: str = Path(...)):
     """Serve audio file from GridFS for playback in the UI."""
     import gridfs
     from bson import ObjectId
+    from fastapi.responses import Response
     db = _get_db()
     fs = gridfs.GridFS(db, collection='audio')
     try:
-        data = fs.get(ObjectId(file_id)).read()
-        from fastapi.responses import Response
-        # Determine content type based on file extension in GridFS metadata
-        file_doc = db['audio.files'].find_one({"_id": ObjectId(file_id)})
-        filename = file_doc.get('filename', '') if file_doc else ''
-        content_type = 'audio/mpeg' if filename.endswith('.mp3') else 'audio/wav'
+        oid = ObjectId(file_id)
+        file_doc = db['audio.files'].find_one({"_id": oid})
+        if not file_doc:
+            raise HTTPException(status_code=404, detail="Audio not found")
+        data = fs.get(oid).read()
+        # Determine content type - PCM needs WAV wrapper for browser playback
+        filename = file_doc.get('filename', '')
+        if filename.endswith('.mp3'):
+            content_type = 'audio/mpeg'
+        elif filename.endswith('.pcm'):
+            # Wrap PCM in WAV header so browsers can play it
+            import wave
+            import io
+            wav_buffer = io.BytesIO()
+            with wave.open(wav_buffer, 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)  # 16-bit
+                wf.setframerate(22050)
+                wf.writeframes(data)
+            data = wav_buffer.getvalue()
+            content_type = 'audio/wav'
+        else:
+            content_type = 'audio/wav'
         return Response(content=data, media_type=content_type)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Audio not found: {e}")

@@ -125,17 +125,17 @@ async def _disable_camera(page) -> None:
 
 async def _watch_for_leave(interview_id: str, page) -> None:
     """
-    Background task: polls interviews.interviews every 0.3s.
+    Background task: polls interviews.interviews every 2s.
     When status becomes 'abandoned' or 'completed', exits IMMEDIATELY.
 
-    Also includes a 5-minute timeout as fallback.
+    Also includes a 2-hour timeout as fallback (matches MAX_INTERVIEW_DURATION_MINUTES).
     """
     start_time = asyncio.get_event_loop().time()
-    timeout_seconds = 300  # 5 minutes fallback
+    timeout_seconds = 7200  # 2 hours fallback (matches MAX_INTERVIEW_DURATION_MINUTES)
     last_status_check = None
 
     while True:
-        await asyncio.sleep(0.3)  # Poll 3 times per second for instant response
+        await asyncio.sleep(2)  # Poll every 2 seconds (balances responsiveness with DB load)
 
         # Check timeout
         elapsed = asyncio.get_event_loop().time() - start_time

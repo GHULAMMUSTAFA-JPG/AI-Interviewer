@@ -98,16 +98,16 @@ async def cleanup_stuck_interviews():
                             is_stuck = True
                             reason = f"redis_heartbeat_timeout (bot status: {bot_status.get('status')})"
                         else:
-                            # No Redis data at all - check MongoDB fallback
-                            created_at = interview.get("created_at", datetime.utcnow())
-                            if created_at < cutoff_duration:
+                            # No Redis data at all - check MongoDB fallback using started_at
+                            started_at = interview.get("started_at")
+                            if started_at and started_at < cutoff_duration:
                                 is_stuck = True
                                 reason = "no_redis_data_interview_too_old"
                 except Exception as e:
                     print(f"⚠️  Redis check failed for {interview_id[:8]}: {e}")
-                    # Fallback to MongoDB check
-                    created_at = interview.get("created_at", datetime.utcnow())
-                    if created_at < cutoff_duration:
+                    # Fallback to MongoDB check using started_at
+                    started_at = interview.get("started_at")
+                    if started_at and started_at < cutoff_duration:
                         is_stuck = True
                         reason = "mongodb_duration_exceeded"
 
@@ -127,8 +127,8 @@ async def cleanup_stuck_interviews():
             interview = item["interview"]
             reason = item["reason"]
             interview_id = interview.get("interview_id", "unknown")
-            created_at = interview.get("created_at", datetime.utcnow())
-            duration_minutes = (datetime.utcnow() - created_at).total_seconds() / 60
+            started_at = interview.get("started_at", datetime.utcnow())
+            duration_minutes = (datetime.utcnow() - started_at).total_seconds() / 60
 
             # Mark as abandoned (atomic update)
             result = await db.interviews.update_one(

@@ -175,7 +175,7 @@ async def _watch_new_interviews(db, shutdown_event: asyncio.Event) -> None:
                         if interview_doc:
                             # Pre-load context so first response is faster
                             from src.config import interview_cache
-                            cache_key = f"context:{interview_id}"
+                            cache_key = f"context_{interview_id}"
                             if cache_key not in interview_cache:
                                 interview_cache[cache_key] = {
                                     "job_description": interview_doc.get("job_description", ""),

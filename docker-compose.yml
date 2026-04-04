@@ -118,6 +118,12 @@ services:
     networks:
       - interview-net
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import pymongo; pymongo.MongoClient('mongodb://mongodb:27017/?directConnection=true').admin.command('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # ────────────────────────────────────────────────────────────────
   # Cleanup Service: Automatically cleans up stuck interviews.
@@ -138,6 +144,12 @@ services:
     networks:
       - interview-net
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import pymongo; pymongo.MongoClient('mongodb://mongodb:27017/?directConnection=true').admin.command('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # ────────────────────────────────────────────────────────────────
   # TTS: text-to-speech.
@@ -220,6 +232,12 @@ services:
     networks:
       - interview-net
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
 
 # ══════════════════════════════════════════════════════════════════════
