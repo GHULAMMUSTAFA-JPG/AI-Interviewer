@@ -1,8 +1,9 @@
-"""pacat audio player for PulseAudio virtual mic.
+"""MP3 audio player for PulseAudio virtual mic.
 
 Audio path:
-  ElevenLabs PCM chunks
-    → pacat stdin
+  ElevenLabs MP3 chunks (mp3_44100_128)
+    → mpg123 stdin (MP3 decoder)
+    → paplay stdout (PCM playback)
     → PULSE_SERVER=unix:/var/run/pulse/native  (shared Docker volume → meeting-bot)
     → PulseAudio virtual_mic null-sink          (--device=virtual_mic)
     → virtual_mic.monitor
@@ -11,8 +12,8 @@ Audio path:
     → Google Meet WebRTC
     → meeting participants hear the agent
 
-pacat is a native PulseAudio tool — more reliable than sounddevice/PortAudio for
-cross-container audio routing via a shared UNIX socket.
+mpg123 is a lightweight, fast MP3 decoder (~200KB).
+paplay plays decoded PCM to the PulseAudio virtual_mic.
 PULSE_SERVER is inherited from the Docker environment (set in docker-compose.yml).
 """
 import asyncio
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 class AudioPlayer:
-    """Plays mono PCM audio via pacat → PulseAudio virtual_mic."""
+    """Plays MP3 audio via mpg123 (decode) → paplay (play) → PulseAudio virtual_mic."""
 
     def __init__(self) -> None:
         self._is_playing = False
@@ -36,29 +37,31 @@ class AudioPlayer:
         stop_event: asyncio.Event,
     ) -> None:
         """
-        Stream PCM chunks from an async generator through pacat → PulseAudio.
+        Stream MP3 chunks from ElevenLabs, decode via mpg123, play via paplay.
 
-        pacat inherits PULSE_SERVER from the environment, so it connects to the
+        Pipeline:
+          MP3 chunks → mpg123 --stdout - (decode to PCM)
+                     → paplay --device=virtual_mic (play to PulseAudio)
+
+        paplay inherits PULSE_SERVER from the environment, so it connects to the
         meeting-bot container's PulseAudio via the shared pulse-socket volume.
         Audio is routed to virtual_mic (null-sink) which Chrome reads as its mic.
         """
-        cmd = [
-            "pacat",
-            "--playback",
-            f"--device={config.virtual_mic}",
-            "--format=s16le",
-            f"--rate={config.sample_rate}",
-            f"--channels={config.channels}",
-            "--latency-msec=50",   # Reduce PulseAudio buffer: ~200 ms → 50 ms
-        ]
-
-        logger.info(
-            f"Opening pacat stream: sink={config.virtual_mic} "
-            f"rate={config.sample_rate} channels={config.channels}"
+        # Shell pipeline: mpg123 reads MP3 from stdin, outputs PCM to stdout,
+        # paplay reads PCM from stdin and plays it to PulseAudio.
+        shell_cmd = (
+            "mpg123 --stdout - | "
+            f"paplay --device={config.virtual_mic} "
+            "--format=s16le --rate=44100 --channels=1 --latency-msec=50"
         )
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
+        logger.info(
+            f"Opening audio pipeline: mpg123 → paplay "
+            f"sink={config.virtual_mic} rate=44100 channels=1 format=mp3"
+        )
+
+        proc = await asyncio.create_subprocess_shell(
+            shell_cmd,
             stdin=asyncio.subprocess.PIPE,
         )
 
@@ -83,7 +86,7 @@ class AudioPlayer:
             proc.stdin.close()
 
             if interrupted:
-                # Kill pacat immediately so buffered audio doesn't keep playing
+                # Kill pipeline immediately so buffered audio doesn't keep playing
                 proc.terminate()
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=1.0)

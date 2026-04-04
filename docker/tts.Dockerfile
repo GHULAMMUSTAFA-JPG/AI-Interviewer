@@ -1,11 +1,12 @@
 FROM python:3.11-slim
 
 # ── System deps ────────────────────────────────────────────────────────────────
-# pulseaudio-utils: provides pacat — streams PCM audio directly to PulseAudio.
-#                   More reliable than sounddevice/PortAudio for cross-container
-#                   audio routing via the shared pulse-socket Docker volume.
+# pulseaudio-utils: provides paplay — plays decoded PCM to PulseAudio.
+# mpg123: lightweight MP3 decoder — decodes ElevenLabs MP3 stream to PCM.
+# Together: ElevenLabs MP3 → mpg123 (decode) → paplay (play) → PulseAudio.
 RUN apt-get update && apt-get install -y \
     pulseaudio-utils \
+    mpg123 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

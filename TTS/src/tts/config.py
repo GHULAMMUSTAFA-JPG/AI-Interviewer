@@ -46,13 +46,13 @@ class Config:
     )
     elevenlabs_model_id: str = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
     elevenlabs_output_format: str = os.getenv(
-        "ELEVENLABS_OUTPUT_FORMAT", "pcm_22050"
+        "ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128"
     )
     elevenlabs_base_url: str = "https://api.elevenlabs.io"
     elevenlabs_connect_timeout: float = 10.0  # seconds
 
     # Audio
-    sample_rate: int = 22050
+    sample_rate: int = 44100  # MP3 output rate
     channels: int = 1
     dtype: str = "int16"
     chunk_size: int = 4096  # bytes
