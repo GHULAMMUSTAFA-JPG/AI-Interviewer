@@ -28,12 +28,12 @@ class TranscriptUpdater:
         """
         if audio_data:
             file_id = await self._bucket.upload_from_stream(
-                f"transcript_{document_id}.pcm",
+                f"transcript_{document_id}.mp3",
                 audio_data,
                 metadata={
                     "transcript_id": str(document_id),
-                    "format": "pcm_22050",
-                    "sample_rate": 22050,
+                    "format": config.elevenlabs_output_format,
+                    "sample_rate": 44100,
                     "channels": 1,
                     "bits": 16,
                 },

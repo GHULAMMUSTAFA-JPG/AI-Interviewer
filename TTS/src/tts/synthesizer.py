@@ -108,11 +108,12 @@ class ElevenLabsSynthesizer:
         }
         body = {
             "text": text,
+            "model_id": config.elevenlabs_model_id,
         }
 
         logger.info(
             f"Synthesizing via ElevenLabs (key #{key_index + 1}): voice={config.elevenlabs_voice_id} "
-            f"chars={len(text)}"
+            f"model={config.elevenlabs_model_id} chars={len(text)}"
         )
 
         try:
