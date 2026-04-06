@@ -39,8 +39,9 @@
     <tr>
       <th>Started</th>
       <th>Interview ID</th>
-      <th>Meeting Status</th>
-      <th>Bot Status</th>
+      <th>Meeting</th>
+      <th>Bot</th>
+      <th>Agent</th>
       <th>Phase</th>
       <th>Turns</th>
       <th></th>
@@ -51,10 +52,11 @@
     <tr id="row-{{ iv.interview_id }}">
       <td>{{ iv.started_at.strftime('%Y-%m-%d %H:%M') if iv.started_at else '—' }}</td>
       <td style="font-size:0.85em; font-family:monospace">{{ iv.interview_id[:16] }}...</td>
-      <td><span class="badge {{ iv.status }}">{{ iv.status }}</span></td>
+      <td><span class="badge {{ iv.status }}" id="meeting-{{ iv.interview_id }}">{{ iv.status }}</span></td>
       <td><span class="badge {{ iv.bot_status or 'pending' }}" id="bot-{{ iv.interview_id }}">{{ iv.bot_status or 'pending' }}</span></td>
-      <td>{{ iv.phase or '—' }}</td>
-      <td>{{ iv.turn_count or 0 }}</td>
+      <td><span id="agent-{{ iv.interview_id }}" style="font-size:0.82em;color:#666">{% if iv.status == 'in_progress' %}idle{% else %}—{% endif %}</span></td>
+      <td id="phase-{{ iv.interview_id }}">{{ iv.phase or '—' }}</td>
+      <td id="turns-{{ iv.interview_id }}">{{ iv.turn_count or 0 }}</td>
       <td style="white-space:nowrap">
         <a href="/conversation/{{ iv.interview_id }}">View</a>
         {% if iv.status == 'in_progress' %}
@@ -79,29 +81,42 @@ if (hasLive) {
 }
 
 async function refreshStatuses() {
-  const inProgressBadges = document.querySelectorAll('td .badge.in_progress');
-  for (const badge of inProgressBadges) {
-    const row = badge.closest('tr');
-    if (!row) continue;
+  const inProgressRows = document.querySelectorAll('tr[id^="row-"]');
+  for (const row of inProgressRows) {
+    const meetingBadge = row.querySelector('[id^="meeting-"]');
+    if (!meetingBadge || !meetingBadge.classList.contains('in_progress')) continue;
+
     const interviewId = row.id.replace('row-', '');
     try {
       const res = await fetch(`/status/${interviewId}`);
       if (!res.ok) continue;
-      const data = await res.json();
+      const d = await res.json();
 
-      // Update meeting status badge
-      badge.textContent = data.status;
-      badge.className = 'badge ' + data.status;
+      // Meeting status
+      meetingBadge.textContent = d.status;
+      meetingBadge.className = 'badge ' + d.status;
 
-      // Update bot status badge
+      // Bot status
       const botBadge = document.getElementById('bot-' + interviewId);
-      if (botBadge) {
-        botBadge.textContent = data.bot_status || 'pending';
-        botBadge.className = 'badge ' + (data.bot_status || 'pending');
+      if (botBadge) { botBadge.textContent = d.bot_status || 'pending'; botBadge.className = 'badge ' + (d.bot_status || 'pending'); }
+
+      // Agent status (thinking / idle / speaking shown inline)
+      const agentEl = document.getElementById('agent-' + interviewId);
+      if (agentEl) {
+        const a = d.agent_status || 'idle';
+        const t = d.tts_status || 'idle';
+        const label = t === 'speaking' ? '🔊 speaking' : (a === 'thinking' ? '💭 thinking' : 'idle');
+        agentEl.textContent = label;
       }
 
-      // If interview ended, remove the End button and stop tracking
-      if (data.status !== 'in_progress') {
+      // Phase and turn count
+      const phaseEl = document.getElementById('phase-' + interviewId);
+      if (phaseEl && d.phase) phaseEl.textContent = d.phase;
+      const turnsEl = document.getElementById('turns-' + interviewId);
+      if (turnsEl && d.turn_count !== undefined) turnsEl.textContent = d.turn_count;
+
+      // If ended: remove End button
+      if (d.status !== 'in_progress') {
         const endBtn = row.querySelector('.end-btn');
         if (endBtn) endBtn.remove();
       }
@@ -117,14 +132,12 @@ async function endInterview(interviewId, btn) {
     const res = await fetch(`/stop/${interviewId}`, { method: 'POST' });
     if (res.ok) {
       btn.remove();
-      // Update status badge immediately
       const row = document.getElementById('row-' + interviewId);
       if (row) {
-        const statusBadge = row.querySelector('td .badge');
-        if (statusBadge) {
-          statusBadge.textContent = 'abandoned';
-          statusBadge.className = 'badge abandoned';
-        }
+        const meetingBadge = document.getElementById('meeting-' + interviewId);
+        if (meetingBadge) { meetingBadge.textContent = 'abandoned'; meetingBadge.className = 'badge abandoned'; }
+        const agentEl = document.getElementById('agent-' + interviewId);
+        if (agentEl) agentEl.textContent = '—';
       }
     } else {
       btn.disabled = false;

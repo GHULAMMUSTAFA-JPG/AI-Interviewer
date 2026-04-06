@@ -44,6 +44,20 @@ from src.exceptions import (
 logger_struct = structlog.get_logger()
 
 
+async def _set_agent_status(interview_id: str, status: str) -> None:
+    """Write agent status to Redis (fire-and-forget, never raises)."""
+    import time as _time
+    try:
+        from src.redis_client import get_redis
+        redis = await get_redis()
+        await redis.hset(
+            f"agent:{interview_id}:status",
+            mapping={"status": status, "updated_at": str(_time.time())}
+        )
+    except Exception:
+        pass  # Redis unavailable — degrade silently
+
+
 def _build_combined_prompt(interview_prompt: str, current_summary: str) -> str:
     """Append a summary-update request to the interview prompt for a combined JSON response."""
     return (
@@ -92,9 +106,9 @@ async def process_candidate_message(
         stage1_latency = (time.perf_counter() - stage1_start) * 1000
         logger_struct.debug("stage1_complete", latency_ms=round(stage1_latency, 2))
 
-        # Check if interview is already completed
-        if context.status == "completed":
-            raise InterviewCompletedError(f"Interview {context.interview_id} already completed")
+        # Check if interview is already completed or abandoned — skip silently
+        if context.status in ("completed", "abandoned"):
+            raise InterviewCompletedError(f"Interview {context.interview_id} already {context.status}")
 
         # Truncate excessively long candidate messages
         context.latest_message, was_truncated = truncate_candidate_message(context.latest_message)
@@ -162,6 +176,7 @@ async def process_candidate_message(
         # ===== STAGE 3: CALL LLM =====
         # On summary turns: one JSON call returns both response + updated summary.
         # On regular turns: one plain call returns response only.
+        await _set_agent_status(context.interview_id, "thinking")
         stage3_start = time.perf_counter()
         logger_struct.info("stage3_calling_llm", provider=Config.LLM_PROVIDER, combined=needs_summary)
         llm = get_llm_provider()
@@ -290,6 +305,24 @@ async def process_candidate_message(
 
             logger.info(f"Evaluation complete: {evaluation['recommendation']} (score: {evaluation['score']})")
 
+        # Mark agent as idle and write phase/turn to Redis for UI live view
+        await _set_agent_status(context.interview_id, "idle")
+        try:
+            from src.redis_client import get_redis
+            import time as _time
+            redis = await get_redis()
+            await redis.hset(
+                f"interview:{context.interview_id}:state",
+                mapping={
+                    "phase": new_phase,
+                    "turn_count": str(new_turn_count),
+                    "status": new_status,
+                    "updated_at": str(_time.time()),
+                }
+            )
+        except Exception:
+            pass
+
         # Build output
         output = AgentOutput(
             response_text=response_text,
@@ -329,6 +362,13 @@ async def process_candidate_message(
             latency_ms=round(total_latency_ms, 2),
             exc_info=True
         )
+        # Best-effort: reset agent status back to idle on any failure
+        try:
+            interview_id_for_err = locals().get("context") and locals()["context"].interview_id
+            if interview_id_for_err:
+                await _set_agent_status(interview_id_for_err, "idle")
+        except Exception:
+            pass
         raise
 
 

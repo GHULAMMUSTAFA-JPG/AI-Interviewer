@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
-from redis_client import get_redis, RedisState
+from redis_client import get_redis, RedisState, close_redis
 
 load_dotenv()
 
@@ -127,57 +127,96 @@ async def start_interview(
 async def stop_interview(interview_id: str = Path(...)):
     """
     Mark interview as abandoned. Meeting-Bot detects this and leaves the meeting.
+    Also sets tts_interrupt=True so any ongoing TTS playback stops immediately.
     """
     db = _get_db()
     result = await db["interviews"].update_one(
         {"interview_id": interview_id},
-        {"$set": {"status": "abandoned", "ended_at": datetime.utcnow()}},
+        {"$set": {
+            "status": "abandoned",
+            "ended_at": datetime.utcnow(),
+            "tts_interrupt": True,   # stop any active TTS playback immediately
+        }},
     )
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Interview not found")
+
+    # Mirror to Redis immediately so UI polls reflect the change without MongoDB lag
+    state = await get_redis_state()
+    if state:
+        try:
+            await state.set_meeting_status(interview_id, "abandoned")
+            await state.set_bot_status(interview_id, "abandoned")
+        except Exception:
+            pass
+
     return JSONResponse({"status": "stopped", "interview_id": interview_id})
 
 
 @app.get("/status/{interview_id}")
 async def interview_status(interview_id: str = Path(...)):
-    """Return current status of an interview (Redis-first for instant updates)."""
-    # Try Redis first (instant, real-time)
+    """
+    Return full real-time status of an interview.
+
+    Redis is checked first for fast, live data. Falls back to MongoDB.
+    Returns: status, bot_status, phase, turn_count, agent_status, tts_status.
+    """
+    db = _get_db()
+
+    # Fetch MongoDB ground truth (phase/turn_count only come from here reliably)
+    mongo_doc = await db["interviews"].find_one(
+        {"interview_id": interview_id},
+        {"status": 1, "bot_status": 1, "phase": 1, "turn_count": 1, "_id": 0},
+    )
+    if not mongo_doc:
+        raise HTTPException(status_code=404, detail="Interview not found")
+
+    result = {
+        "status":       mongo_doc.get("status", "unknown"),
+        "bot_status":   mongo_doc.get("bot_status", "pending"),
+        "phase":        mongo_doc.get("phase", "INTRO"),
+        "turn_count":   mongo_doc.get("turn_count", 0),
+        "agent_status": "idle",
+        "tts_status":   "idle",
+        "source":       "mongodb",
+    }
+
+    # Overlay Redis for instant component-level updates
     state = await get_redis_state()
     if state:
         try:
-            bot_status = await state.get_bot_status(interview_id)
-            meeting_status = await state.get_meeting_status(interview_id)
+            redis = await get_redis()
 
-            if bot_status or meeting_status:
-                return JSONResponse({
-                    "status": meeting_status.get("status", "unknown"),
-                    "bot_status": bot_status.get("status", "pending"),
-                    "source": "redis",
-                    **bot_status,
-                    **meeting_status
-                })
+            bot_r = await state.get_bot_status(interview_id)
+            if bot_r and bot_r.get("status"):
+                result["bot_status"] = bot_r["status"]
+                result["source"] = "redis"
+
+            meeting_r = await state.get_meeting_status(interview_id)
+            if meeting_r and meeting_r.get("status"):
+                result["status"] = meeting_r["status"]
+                result["source"] = "redis"
+
+            agent_r = await redis.hgetall(f"agent:{interview_id}:status")
+            if agent_r and agent_r.get("status"):
+                result["agent_status"] = agent_r["status"]
+
+            tts_r = await redis.hgetall(f"tts:{interview_id}:status")
+            if tts_r and tts_r.get("status"):
+                result["tts_status"] = tts_r["status"]
+
+            # Interview state written by pipeline.py (phase/turn override)
+            iv_r = await redis.hgetall(f"interview:{interview_id}:state")
+            if iv_r:
+                if iv_r.get("phase"):
+                    result["phase"] = iv_r["phase"]
+                if iv_r.get("turn_count"):
+                    result["turn_count"] = int(iv_r["turn_count"])
+
         except Exception as redis_err:
             print(f"⚠️  Redis status error for {interview_id}: {redis_err}")
-            # Fall through to MongoDB
 
-    # Fallback to MongoDB
-    try:
-        db = _get_db()
-        doc = await db["interviews"].find_one(
-            {"interview_id": interview_id},
-            {"status": 1, "bot_status": 1, "_id": 0},
-        )
-        if not doc:
-            raise HTTPException(status_code=404, detail="Interview not found")
-        return JSONResponse({
-            "status": doc.get("status"),
-            "bot_status": doc.get("bot_status", "pending"),
-            "source": "mongodb"
-        })
-    except HTTPException:
-        raise
-    except Exception as mongo_err:
-        raise HTTPException(status_code=500, detail=f"Status check failed: {mongo_err}")
+    return JSONResponse(result)
 
 
 @app.get("/logs", response_class=HTMLResponse)

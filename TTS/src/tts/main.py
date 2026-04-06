@@ -62,6 +62,19 @@ class TTSService:
         for i in range(0, len(data), config.chunk_size):
             yield data[i : i + config.chunk_size]
 
+    async def _set_tts_status(self, interview_id: str, status: str) -> None:
+        """Write TTS status to Redis (fire-and-forget)."""
+        import time as _time
+        try:
+            from .redis_client import get_redis
+            redis = await get_redis()
+            await redis.hset(
+                f"tts:{interview_id}:status",
+                mapping={"status": status, "updated_at": str(_time.time())}
+            )
+        except Exception:
+            pass
+
     async def _process_transcript(self, doc: TranscriptDocument) -> None:
         """Synthesize (or replay from DB cache), play, and save audio.
 
@@ -74,6 +87,7 @@ class TTSService:
             f"Processing transcript: interview={doc.interview_id} chars={len(doc.text)}"
         )
 
+        await self._set_tts_status(doc.interview_id, "speaking")
         # Arm: mark bot as speaking, clear stale interrupt, start watching.
         await self._interrupt_handler.arm(doc.interview_id)
 
@@ -145,6 +159,7 @@ class TTSService:
         finally:
             # Disarm: mark bot as no longer speaking, cancel change stream watcher
             await self._interrupt_handler.disarm(doc.interview_id)
+            await self._set_tts_status(doc.interview_id, "idle")
 
     async def _maybe_resume(self, interview_id: str, text: str, interrupted_at: datetime) -> None:
         """
