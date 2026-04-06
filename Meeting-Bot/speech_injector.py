@@ -20,8 +20,8 @@ SPEECH_INJECTION_SCRIPT = """
     let botStoppedAt = 0;
 
     // ─── Configuration ───────────────────────────────────────────
-    const SILENCE_MS = 1500;       // Save after 1.5s silence (was 2s, faster now)
-    const ECHO_GATE_MS = 2000;     // After bot stops, ignore STT for 2s (covers echo tail + natural pause)
+    const SILENCE_MS = 500;        // Save after 0.5s silence — fast agent response
+    const ECHO_GATE_MS = 2000;     // After bot stops, ignore STT for 2s (covers PulseAudio buffer lag)
 
     // ─── Python bridge ───────────────────────────────────────────
     // Python reads these via page.on('console')
@@ -42,9 +42,24 @@ SPEECH_INJECTION_SCRIPT = """
         emit("TTS_STARTED:");
     };
 
-    window.__tts_ended = function() {
+    window.__tts_ended = function(wasInterrupted) {
         isBotSpeaking = false;
-        botStoppedAt = Date.now();
+        // Natural end: bot finished normally. Google STT may still be processing
+        // the last 1-2 seconds of audio it queued before the stream stopped.
+        // Run the full echo gate so those delayed results don't contaminate the
+        // candidate's transcript.
+        //
+        // Interrupt: candidate stopped the bot — pacat was killed immediately, so
+        // the PulseAudio buffer is empty. Skip the echo gate so the candidate's
+        // speech (the very words they used to interrupt) is captured right away.
+        botStoppedAt = wasInterrupted ? Date.now() - ECHO_GATE_MS : Date.now();
+
+        // Always clear buffers: during bot speaking onresult is hard-gated
+        // (isBotSpeaking=true), so these are already empty — this is defensive.
+        sessionTranscript = "";
+        finalTranscript = "";
+        if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
+        speechActive = false;
         emit("TTS_ENDED:");
     };
 

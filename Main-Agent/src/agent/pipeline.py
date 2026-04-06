@@ -221,6 +221,35 @@ async def process_candidate_message(
             else:
                 logger.warning("Fallback disabled — using LLM output despite validation warnings")
 
+        # ===== STALE CHECK (between Stage 4 and Stage 5) =====
+        # If a newer candidate message arrived while the LLM was thinking, discard
+        # this response. The per-interview lock serialises processing, so the newer
+        # message is already queued and will run next with full conversation context.
+        # This handles the 500ms fragmentation case: "I worked on..." → silence →
+        # early save → LLM starts → "...distributed systems" arrives → LLM finishes
+        # → discard → second pipeline sees both fragments in history → coherent reply.
+        try:
+            newer_candidate = await db.transcripts.find_one({
+                "interview_id": context.interview_id,
+                "speaker": "candidate",
+                "_id": {"$gt": ObjectId(transcript_id)},
+            })
+            if newer_candidate:
+                logger.info(
+                    f"[STALE] Discarding response — newer candidate message "
+                    f"{newer_candidate['_id']} arrived during LLM call"
+                )
+                await _set_agent_status(context.interview_id, "idle")
+                return AgentOutput(
+                    response_text="",
+                    phase=context.phase,
+                    should_advance=False,
+                    is_fallback=True,
+                )
+        except Exception as stale_err:
+            # Never block on stale check — proceed if the query fails
+            logger.warning(f"[STALE CHECK] Query failed (proceeding): {stale_err}")
+
         # ===== STAGE 5: SAVE & SEND =====
         logger.info(f"[STAGE 5] Saving response and updating state")
 

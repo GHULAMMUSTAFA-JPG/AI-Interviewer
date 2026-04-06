@@ -54,9 +54,9 @@ async def _flush_speech_buffer(interview_id: str) -> None:
     """Save buffered speech to DB after candidate stops speaking."""
     global _speech_buffer, _speech_timer, _last_saved_text, last_speech_time
 
-    if _speech_timer:
-        _speech_timer.cancel()
-        _speech_timer = None
+    # Clear the timer reference without cancelling — this function IS the task,
+    # so cancelling _speech_timer here would cancel ourselves at the next await.
+    _speech_timer = None
 
     if _speech_buffer.strip():
         current_text = _speech_buffer.strip()
@@ -417,6 +417,10 @@ async def join_meeting_and_transcribe(
                     if text.startswith('STT_SPEECH_START:'):
                         global last_speech_time
                         last_speech_time = asyncio.get_event_loop().time()
+                        # Cancel any pending flush from a previous turn before clearing
+                        if _speech_timer and not _speech_timer.done():
+                            _speech_timer.cancel()
+                            _speech_timer = None
                         _speech_buffer = ""
                         msg = "🎤 [SPEECH STARTED] Candidate speaking..."
                         print(msg); await push_log(msg)
@@ -433,33 +437,34 @@ async def join_meeting_and_transcribe(
                                 print(f"⚠️ Interrupt signal error: {int_err}")
                         return
 
-                    # Capture speech end - schedule save after silence
+                    # Speech ended — JS will emit TRANSCRIPT_EVENT in ~1.5s.
+                    # Don't flush here; wait for the final text to arrive.
                     if text.startswith('STT_SPEECH_END:'):
-                        msg = f"🔇 [SPEECH ENDED] Finalizing transcript (timeout={_SPEECH_TIMEOUT_SEC}s)..."
+                        msg = "🔇 [SPEECH ENDED] Waiting for final transcript..."
                         print(msg); await push_log(msg)
-                        # Cancel existing timer
-                        if _speech_timer:
-                            _speech_timer.cancel()
-                        # Schedule save after a short delay to ensure all TRANSCRIPT_EVENTs are in
-                        _speech_timer = asyncio.create_task(
-                            asyncio.sleep(_SPEECH_TIMEOUT_SEC)
-                        )
-                        await _speech_timer
-                        await _flush_speech_buffer(interview_id)
                         return
 
-                    # Capture TRANSCRIPT_EVENT from Web Speech API (final results - accumulate during speech)
+                    # Final transcript from JS silence timer (fires 1.5s after speech ends).
+                    # JS has already confirmed silence — flush to DB immediately.
                     if text.startswith('TRANSCRIPT_EVENT:'):
                         final_text = text.split('TRANSCRIPT_EVENT:', 1)[1].strip()
                         if final_text:
-                            # Accumulate into buffer (candidate may continue speaking)
+                            # Accumulate (candidate may speak in multiple segments)
                             if _speech_buffer:
                                 _speech_buffer += " " + final_text
                             else:
                                 _speech_buffer = final_text
-                            
-                            msg = f"🎤 [STT FINAL - BUFFERING] \"{final_text}\" → Buffer: \"{_speech_buffer[:100]}...\""
+
+                            msg = f"🎤 [STT FINAL] \"{final_text[:80]}\""
                             print(msg); await push_log(msg)
+
+                            # Cancel any pending timer and flush immediately.
+                            # The JS already waited 1.5s — no need to wait again.
+                            if _speech_timer and not _speech_timer.done():
+                                _speech_timer.cancel()
+                            _speech_timer = asyncio.create_task(
+                                _flush_speech_buffer(interview_id)
+                            )
                         return
 
                     # Log other STT events for debugging
@@ -616,7 +621,7 @@ async def join_meeting_and_transcribe(
             msg = "✅ Admitted to meeting!"
             print(msg); await push_log(msg)
 
-            # CRITICAL: Switch default source to BotMic for STT (matches other project)
+            # CRITICAL: Switch default source to BotMic for STT
             # This ensures Web Speech API captures meeting audio, not TTS silence
             try:
                 result = await asyncio.create_subprocess_exec(
@@ -631,29 +636,31 @@ async def join_meeting_and_transcribe(
                 msg = f"⚠️  Failed to switch to BotMic: {e}"
                 print(msg); await push_log(msg)
 
-            # Signal interview-agent to send greeting (after proper delay)
-            try:
-                # Wait 2 seconds for bot to fully join meeting audio
-                msg = "⏳ Waiting 2 seconds before greeting..."
-                print(msg); await push_log(msg)
-                await page.wait_for_timeout(2000)
+            # Wait 2 seconds for audio routing to stabilize
+            msg = "⏳ Waiting 2 seconds for audio to stabilize..."
+            print(msg); await push_log(msg)
+            await page.wait_for_timeout(2000)
 
+            # Inject Web Speech API BEFORE setting admitted.
+            # This ensures the echo gate is armed via _watch_agent_transcripts
+            # before the greeting starts — prevents bot voice from leaking into STT.
+            msg = "🎤 Injecting Web Speech API..."
+            print(msg); await push_log(msg)
+            await inject_speech_recognition(page, session_id)
+            msg = "✅ Web Speech API active"
+            print(msg); await push_log(msg)
+
+            # Short delay to let STT initialize before triggering the greeting
+            await page.wait_for_timeout(500)
+
+            # Set admitted — this triggers the greeting watcher in Main-Agent.
+            # _watch_agent_transcripts will pre-gate STT the moment the greeting
+            # transcript is inserted, so the echo gate is active before TTS plays.
+            try:
                 await _set_bot_state(interview_id, "admitted", db, mongo_connected)
                 await push_log("✅ bot_status=admitted → greeting will trigger")
             except Exception as _dbe:
                 await push_log(f"⚠️  Failed to set bot_status: {_dbe}")
-
-            # Wait additional 3 seconds for audio to stabilize (total 5s)
-            await page.wait_for_timeout(3000)
-
-            # Inject Web Speech API
-            msg = "🎤 Injecting Web Speech API for BATCH transcription..."
-            print(msg); await push_log(msg)
-            
-            await inject_speech_recognition(page, session_id)
-            
-            msg = "✅ Web Speech API active — capturing speech (will save at end)"
-            print(msg); await push_log(msg)
 
             # Start heartbeat (sends bot_heartbeat to DB and Redis every 10 seconds)
             async def _send_heartbeat():
@@ -728,10 +735,17 @@ async def join_meeting_and_transcribe(
                                             msg = f"⚠️ __tts_started eval error: {eval_err}"
                                             print(msg); await push_log(msg)
                                     else:
-                                        msg = "🔊 Bot done speaking — resuming STT (echo gate active)"
+                                        # Check if the bot was stopped by a candidate interrupt.
+                                        # If yes, pacat was killed immediately — no audio in buffer,
+                                        # so we skip the echo gate to capture the candidate's
+                                        # interruption speech without the 2s delay.
+                                        was_interrupted = bool(full_doc.get("tts_interrupt", False))
+                                        gate_label = "no echo gate (interrupted)" if was_interrupted else "echo gate active"
+                                        msg = f"🔊 Bot done speaking — resuming STT ({gate_label})"
                                         print(msg); await push_log(msg)
                                         try:
-                                            await page.evaluate("window.__tts_ended()")
+                                            js_flag = "true" if was_interrupted else "false"
+                                            await page.evaluate(f"window.__tts_ended({js_flag})")
                                         except Exception as eval_err:
                                             msg = f"⚠️ __tts_ended eval error: {eval_err}"
                                             print(msg); await push_log(msg)

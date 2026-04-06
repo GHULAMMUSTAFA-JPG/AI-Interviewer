@@ -75,6 +75,9 @@ else
     sleep 1
 fi
 
+# Boost VirtualSink output volume so TTS audio is clearly audible in the meeting
+pactl set-sink-volume VirtualSink 150% && log "✅ VirtualSink volume set to 150%" || log "⚠️  Could not set VirtualSink volume"
+
 # AFTER PulseAudio starts, start keep-alive for virtual_mic (matches other project)
 log "Starting virtual_mic keep-alive (silence)..."
 pacat --playback --device=virtual_mic \
