@@ -50,8 +50,11 @@ async def load_interview_context(
         # 2. Check cache for static context (CV, JD, company)
         cache_key = f"context_{interview_id}"
 
-        if cache_key in interview_cache:
+        if cache_key in interview_cache and "interview_id" in interview_cache[cache_key]:
             # CACHE HIT — refresh only dynamic fields
+            # Guard: pre-warm in main.py stores partial data (JD/CV/company only).
+            # If interview_id is missing the entry is incomplete — fall through to
+            # a full load which will overwrite it with the complete context.
             cached_context = interview_cache[cache_key]
             logger.debug("context_cache_hit", interview_id=interview_id)
 
@@ -81,9 +84,9 @@ async def load_interview_context(
 
             context = InterviewContext(
                 **cached_context,
-                phase=interview["phase"],
-                turn_count=interview["turn_count"],
-                status=interview["status"],
+                phase=interview.get("phase", "INTRO"),
+                turn_count=interview.get("turn_count", 0),
+                status=interview.get("status", "in_progress"),
                 conversation_summary=interview.get("conversation_summary", ""),
                 recent_messages=recent_messages,
                 latest_message=latest_message,
