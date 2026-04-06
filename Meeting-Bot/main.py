@@ -113,45 +113,77 @@ async def main() -> None:
         interview_id = str(interview.get("interview_id", interview.get("_id", "unknown")))
         try:
             await run_bot(interview)
+        except Exception as exc:
+            print(f"❌ Bot task error for {interview_id}: {exc}")
         finally:
             _active.discard(interview_id)
-            # Update Redis status when bot finishes
             if state:
                 try:
                     await state.set_bot_status(interview_id, "completed")
                     await state.set_meeting_status(interview_id, "ended")
-                except:
+                except Exception:
                     pass
 
-    async with db["interviews"].watch(
-        [{"$match": {"operationType": "insert"}}],
-        full_document="updateLookup",
-    ) as stream:
-        async for change in stream:
-            full_doc = change.get("fullDocument") or {}
-            status = full_doc.get("status", "")
-
-            if status != "in_progress":
-                continue
-
-            interview_id = full_doc.get("interview_id", "unknown")
-
-            if interview_id in _active:
-                msg = f"Bot already running for {interview_id} — skipping duplicate"
+    # Change stream with auto-reconnect — if MongoDB drops and reconnects,
+    # the watcher resumes rather than dying permanently.
+    retry_delay = 2.0
+    while not shutdown_event.is_set():
+        try:
+            async with db["interviews"].watch(
+                [{"$match": {"operationType": "insert"}}],
+                full_document="updateLookup",
+            ) as stream:
+                retry_delay = 2.0  # reset on successful open
+                msg = "👀 Change stream open — watching for new interviews"
                 print(msg); await push_log(msg)
-                continue
 
-            _active.add(interview_id)
-            asyncio.create_task(_run_and_release(full_doc))
+                async for change in stream:
+                    if shutdown_event.is_set():
+                        break
 
+                    full_doc = change.get("fullDocument") or {}
+                    if full_doc.get("status") != "in_progress":
+                        continue
+
+                    interview_id = full_doc.get("interview_id", "unknown")
+                    if interview_id in _active:
+                        msg = f"Bot already running for {interview_id} — skipping duplicate"
+                        print(msg); await push_log(msg)
+                        continue
+
+                    _active.add(interview_id)
+                    asyncio.create_task(_run_and_release(full_doc))
+
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
             if shutdown_event.is_set():
                 break
+            msg = f"⚠️ Change stream error (retry in {retry_delay}s): {exc}"
+            print(msg); await push_log(msg)
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 30.0)
 
-    for interview_id in list(_active):
-        msg = f"Waiting for bot {interview_id} to finish..."
+            # Reconnect MongoDB client on persistent errors
+            try:
+                await client.admin.command("ping")
+            except Exception:
+                msg = "🔄 MongoDB connection lost — reconnecting..."
+                print(msg); await push_log(msg)
+                try:
+                    client = await _connect_with_retry(max_attempts=5)
+                    db = client[DB_NAME]
+                    msg = "✅ MongoDB reconnected"
+                    print(msg); await push_log(msg)
+                except Exception as reconnect_exc:
+                    msg = f"❌ MongoDB reconnect failed: {reconnect_exc}"
+                    print(msg); await push_log(msg)
+
+    # Graceful shutdown — wait for active bots to finish
+    if _active:
+        msg = f"Shutdown: waiting for {len(_active)} active bot(s) to finish..."
         print(msg); await push_log(msg)
 
-    # Cleanup Redis connection
     await close_redis()
 
 

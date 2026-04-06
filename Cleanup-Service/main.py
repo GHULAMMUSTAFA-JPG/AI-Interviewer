@@ -41,23 +41,35 @@ _redis_state = None
 
 
 async def get_db():
-    """Get or create MongoDB client (singleton pattern) with retry."""
+    """Get or create MongoDB client with reconnect on stale connection."""
     global _client, _db
-    if _client is None:
-        for attempt in range(10):
+    # Ping first — reconnect if connection was dropped
+    if _client is not None:
+        try:
+            await _client.admin.command("ping")
+            return _db
+        except Exception:
+            print("⚠️  MongoDB connection lost — reconnecting...")
             try:
-                _client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-                await _client.admin.command("ping")
-                _db = _client[DB_NAME]
-                print(f"✅ MongoDB connected: {MONGO_URI}")
-                return _db
-            except Exception as e:
-                if attempt == 9:
-                    raise
-                wait = min(2 ** attempt, 10)
-                print(f"⚠️  MongoDB connection failed (attempt {attempt+1}/10), retrying in {wait}s: {e}")
-                await asyncio.sleep(wait)
-    return _db
+                _client.close()
+            except Exception:
+                pass
+            _client = None
+            _db = None
+
+    for attempt in range(10):
+        try:
+            _client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+            await _client.admin.command("ping")
+            _db = _client[DB_NAME]
+            print(f"✅ MongoDB connected: {MONGO_URI}")
+            return _db
+        except Exception as e:
+            if attempt == 9:
+                raise
+            wait = min(2 ** attempt, 10)
+            print(f"⚠️  MongoDB connection failed (attempt {attempt+1}/10), retrying in {wait}s: {e}")
+            await asyncio.sleep(wait)
 
 
 async def cleanup_stuck_interviews():
@@ -92,6 +104,18 @@ async def cleanup_stuck_interviews():
                 try:
                     is_alive = await _redis_state.check_bot_alive(interview_id, timeout=HEARTBEAT_TIMEOUT_SECONDS)
                     if not is_alive:
+                        # CRITICAL: Grace period - don't abandon interviews that just started
+                        # Bot needs time to join, get admitted, and send first heartbeat (~90s)
+                        started_at = interview.get("started_at")
+                        if started_at:
+                            seconds_since_start = (datetime.utcnow() - started_at).total_seconds()
+                            if seconds_since_start < HEARTBEAT_TIMEOUT_SECONDS:
+                                # Still in grace period - bot is likely still joining
+                                continue
+                        else:
+                            # No started_at - assume it's new, give it grace period
+                            continue
+
                         # Check if bot ever sent a heartbeat
                         bot_status = await _redis_state.get_bot_status(interview_id)
                         if bot_status and bot_status.get("status"):
@@ -99,7 +123,6 @@ async def cleanup_stuck_interviews():
                             reason = f"redis_heartbeat_timeout (bot status: {bot_status.get('status')})"
                         else:
                             # No Redis data at all - check MongoDB fallback using started_at
-                            started_at = interview.get("started_at")
                             if started_at and started_at < cutoff_duration:
                                 is_stuck = True
                                 reason = "no_redis_data_interview_too_old"
@@ -108,8 +131,11 @@ async def cleanup_stuck_interviews():
                     # Fallback to MongoDB check using started_at
                     started_at = interview.get("started_at")
                     if started_at and started_at < cutoff_duration:
-                        is_stuck = True
-                        reason = "mongodb_duration_exceeded"
+                        # Also apply grace period for MongoDB-only checks
+                        seconds_since_start = (datetime.utcnow() - started_at).total_seconds()
+                        if seconds_since_start >= HEARTBEAT_TIMEOUT_SECONDS:
+                            is_stuck = True
+                            reason = "mongodb_duration_exceeded"
 
             # Mark as stuck
             if is_stuck:

@@ -37,7 +37,7 @@ class Config:
         else None
     )
     pulse_server: str = os.getenv("PULSE_SERVER", "unix:/run/user/1000/pulse/native")
-    virtual_mic: str = os.getenv("VIRTUAL_MIC", "virtual_mic")
+    virtual_mic: str = os.getenv("VIRTUAL_MIC", "VirtualSink")
 
     # ElevenLabs - Support multiple API keys with fallback
     elevenlabs_api_keys: List[str] = field(default_factory=_load_elevenlabs_keys)

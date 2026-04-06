@@ -27,8 +27,8 @@ from mongo_handler import (
     connect_to_mongo,
     disconnect_from_mongo,
     insert_transcript,
-    db,  # Import the global db variable
 )
+import mongo_handler  # Import module to access db dynamically
 from speech_injector import inject_speech_recognition
 
 # Load environment variables (from Docker env or .env file)
@@ -45,35 +45,36 @@ last_speech_time = asyncio.get_event_loop().time()
 _speech_buffer = ""
 _speech_timer = None
 _last_saved_text = ""  # Track what we already saved to prevent duplicates
-_SPEECH_TIMEOUT_SEC = 0.3  # VAD-enhanced: 300ms silence = speech ended (was 2.0s)
+# 1.5s silence = speech ended. 0.3s was too aggressive — mid-sentence pauses
+# split one response into multiple DB documents, causing the agent to reply to fragments.
+_SPEECH_TIMEOUT_SEC = 1.5
 
 
 async def _flush_speech_buffer(interview_id: str) -> None:
     """Save buffered speech to DB after candidate stops speaking."""
-    global _speech_buffer, _speech_timer, _last_saved_text
-    
+    global _speech_buffer, _speech_timer, _last_saved_text, last_speech_time
+
     if _speech_timer:
         _speech_timer.cancel()
         _speech_timer = None
-    
+
     if _speech_buffer.strip():
-        # Check for duplicates - don't save same text twice
         current_text = _speech_buffer.strip()
+
+        # Dedup: don't save identical text twice in a row
         if current_text == _last_saved_text:
-            msg = f"⚠️  [DUPLICATE PREVENTED] Same as last save"
+            msg = "⚠️  [DUPLICATE PREVENTED] Same text as last save — discarding"
             print(msg); await push_log(msg)
-            last_speech_time = asyncio.get_event_loop().time()
             _speech_buffer = ""
             return
-            
-        # Save full buffered speech to DB
+
+        # Save to DB
         await insert_transcript(interview_id, "candidate", current_text)
-        msg = f"💬 [SAVED TO DB - END OF SPEECH] \"{current_text[:100]}...\""
+        msg = f"💬 [SAVED TO DB] \"{current_text[:120]}{'...' if len(current_text) > 120 else ''}\""
         print(msg); await push_log(msg)
-        
-        # Update last saved text
+
         _last_saved_text = current_text
-        last_speech_time = asyncio.get_event_loop().time()
+        last_speech_time = asyncio.get_event_loop().time()  # reset inactivity clock
         _speech_buffer = ""
 
 
@@ -123,7 +124,7 @@ async def _disable_camera(page) -> None:
     print(msg); await push_log(msg)
 
 
-async def _watch_for_leave(interview_id: str, page) -> None:
+async def _watch_for_leave(interview_id: str, page, db=None, mongo_connected=False) -> None:
     """
     Background task: polls interviews.interviews every 2s.
     When status becomes 'abandoned' or 'completed', exits IMMEDIATELY.
@@ -145,7 +146,7 @@ async def _watch_for_leave(interview_id: str, page) -> None:
 
             # Update status to abandoned so UI knows meeting ended
             try:
-                if db:
+                if mongo_connected and db:
                     await db.interviews.update_one(
                         {"interview_id": interview_id},
                         {"$set": {"status": "abandoned", "ended_at": datetime.utcnow()}}
@@ -173,7 +174,7 @@ async def _watch_for_leave(interview_id: str, page) -> None:
             return
 
         try:
-            if db is None:
+            if not mongo_connected or db is None:
                 continue
 
             interview = await db.interviews.find_one(
@@ -247,9 +248,9 @@ async def join_meeting_and_transcribe(
         8. Capture ALL speech during meeting (buffer locally)
         9. When meeting ends: insert ONE final transcript
     """
-    global _transcript_buffer, _speech_buffer, _speech_timer
+    global _transcript_buffer, _speech_buffer, _speech_timer, last_speech_time
     _transcript_buffer = []  # Reset buffer
-    last_speech_time = asyncio.get_event_loop().time()
+    last_speech_time = asyncio.get_event_loop().time()  # reset inactivity clock for this session
     _speech_buffer = ""
     _speech_timer = None
     
@@ -280,6 +281,10 @@ async def join_meeting_and_transcribe(
     (_prefs_dir / "Preferences").write_text(str(_prefs).replace("'", '"'))
 
     mongo_connected = await connect_to_mongo()
+    
+    # Get the live db reference after connection
+    db = mongo_handler.db
+    
     if not mongo_connected:
         msg = "⚠️  Continuing without MongoDB (local transcripts only)"
         print(msg); await push_log(msg)
@@ -370,38 +375,34 @@ async def join_meeting_and_transcribe(
                     text = msg.text
                     global _speech_buffer, _speech_timer
 
-                    # Capture INTERIM results (real-time as you speak) - LOG ONLY, DON'T SAVE
+                    # Interim results — real-time partial transcript, log only.
+                    # Interrupt is triggered by STT_SPEECH_START (once per utterance),
+                    # not here — avoids flooding MongoDB on every word.
                     if text.startswith('STT_INTERIM:'):
                         interim_text = text.split('STT_INTERIM:', 1)[1].strip()
                         if interim_text:
-                            # TRIGGER INTERRUPT: If candidate speaks while bot is talking
-                            if status_state["bot_speaking"]:
-                                await db.interviews.update_one(
-                                    {"interview_id": interview_id},
-                                    {"$set": {"tts_interrupt": True}}
-                                )
-                                msg_log = "⚡ [INTERRUPT] Candidate spoke while bot was talking"
-                                print(msg_log); await push_log(msg_log)
-
-                            msg = f"🎤 [STT INTERIM] {interim_text}"
-                            print(msg); await push_log(msg)
+                            msg = f"🎤 [INTERIM] {interim_text[:120]}"
+                            print(msg)  # stdout only, not push_log (too noisy for remote logs)
                         return
 
-                    # Capture speech start - reset buffer
+                    # Capture speech start - reset buffer and inactivity clock
                     if text.startswith('STT_SPEECH_START:'):
-                        # TRIGGER INTERRUPT: If candidate starts speaking while bot is talking
-                        if status_state["bot_speaking"]:
-                            await db.interviews.update_one(
-                                {"interview_id": interview_id},
-                                {"$set": {"tts_interrupt": True}}
-                            )
-                            msg_log = "⚡ [INTERRUPT] Candidate started speaking"
-                            print(msg_log); await push_log(msg_log)
-
+                        global last_speech_time
                         last_speech_time = asyncio.get_event_loop().time()
                         _speech_buffer = ""
                         msg = "🎤 [SPEECH STARTED] Candidate speaking..."
                         print(msg); await push_log(msg)
+                        # Trigger interrupt if bot is currently speaking (candidate cutting in)
+                        if status_state["bot_speaking"] and mongo_connected and db is not None:
+                            try:
+                                await db.interviews.update_one(
+                                    {"interview_id": interview_id},
+                                    {"$set": {"tts_interrupt": True}}
+                                )
+                                msg_log = "⚡ [INTERRUPT] Candidate interrupted bot"
+                                print(msg_log); await push_log(msg_log)
+                            except Exception as int_err:
+                                print(f"⚠️ Interrupt signal error: {int_err}")
                         return
 
                     # Capture speech end - schedule save after silence
@@ -565,9 +566,9 @@ async def join_meeting_and_transcribe(
                 if elapsed > admission_timeout:
                     msg = f"❌ Not admitted after {admission_timeout}s — stuck in lobby"
                     print(msg); await push_log(msg)
-                    
+
                     # Mark as abandoned so UI updates
-                    if db:
+                    if mongo_connected:
                         await db.interviews.update_one(
                             {"interview_id": interview_id},
                             {"$set": {
@@ -639,7 +640,7 @@ async def join_meeting_and_transcribe(
                 try:
                     while True:
                         await asyncio.sleep(10)
-                        if db:
+                        if mongo_connected:
                             await db.interviews.update_one(
                                 {"interview_id": interview_id},
                                 {"$set": {"bot_heartbeat": datetime.utcnow()}}
@@ -660,9 +661,14 @@ async def join_meeting_and_transcribe(
 
             heartbeat_task = asyncio.create_task(_send_heartbeat())
 
-            # Start watching bot_speaking to pause STT and prevent echo
-            # NEW: Uses __tts_started/__tts_ended for better echo cancellation
+            # Watch bot_speaking flag (set by TTS interrupt_handler.arm/disarm) to
+            # pause Web Speech API while agent is talking — prevents echo transcription.
             async def _watch_bot_speaking():
+                if not mongo_connected or db is None:
+                    msg = "⚠️ Bot speaking watcher skipped — MongoDB not connected"
+                    print(msg); await push_log(msg)
+                    return
+
                 pipeline = [
                     {
                         "$match": {
@@ -671,38 +677,64 @@ async def join_meeting_and_transcribe(
                         }
                     }
                 ]
-                try:
-                    async with db.interviews.watch(pipeline, full_document="updateLookup") as stream:
-                        async for change in stream:
-                            full_doc = change.get("fullDocument") or {}
-                            is_speaking = full_doc.get("bot_speaking", False)
 
-                            if is_speaking != status_state["bot_speaking"]:
-                                status_state["bot_speaking"] = is_speaking
-                                if is_speaking:
-                                    msg = "🔇 Bot started speaking — pausing STT to prevent echo"
+                retry_delay = 1.0
+                while True:
+                    try:
+                        msg = "👁️ Bot speaking watcher: change stream opened"
+                        print(msg); await push_log(msg)
+                        async with db.interviews.watch(pipeline, full_document="updateLookup") as stream:
+                            retry_delay = 1.0  # reset on successful open
+                            async for change in stream:
+                                try:
+                                    full_doc = change.get("fullDocument") or {}
+                                    is_speaking = full_doc.get("bot_speaking", False)
+
+                                    if is_speaking == status_state["bot_speaking"]:
+                                        continue  # no change
+
+                                    status_state["bot_speaking"] = is_speaking
+
+                                    if is_speaking:
+                                        msg = "🔇 Bot speaking — clearing buffer + gating STT"
+                                        print(msg); await push_log(msg)
+                                        global _speech_buffer, _last_saved_text
+                                        _speech_buffer = ""
+                                        _last_saved_text = ""
+                                        try:
+                                            await page.evaluate("window.__tts_started()")
+                                        except Exception as eval_err:
+                                            msg = f"⚠️ __tts_started eval error: {eval_err}"
+                                            print(msg); await push_log(msg)
+                                    else:
+                                        msg = "🔊 Bot done speaking — resuming STT (echo gate active)"
+                                        print(msg); await push_log(msg)
+                                        try:
+                                            await page.evaluate("window.__tts_ended()")
+                                        except Exception as eval_err:
+                                            msg = f"⚠️ __tts_ended eval error: {eval_err}"
+                                            print(msg); await push_log(msg)
+                                except Exception as inner_err:
+                                    msg = f"⚠️ Bot speaking watcher inner error: {inner_err}"
                                     print(msg); await push_log(msg)
-                                    # NEW: Call TTS gate to clear buffer and block STT
-                                    await page.evaluate("window.__tts_started()")
-                                else:
-                                    msg = "🔊 Bot stopped speaking — resuming STT"
-                                    print(msg); await push_log(msg)
-                                    # NEW: Call TTS gate to unblock STT after echo delay
-                                    await page.evaluate("window.__tts_ended()")
-                except asyncio.CancelledError:
-                    pass
-                except Exception as e:
-                    print(f"Bot speaking watcher error: {e}")
+                    except asyncio.CancelledError:
+                        return  # Normal shutdown — don't retry
+                    except Exception as e:
+                        msg = f"⚠️ Bot speaking watcher error (retry in {retry_delay}s): {e}"
+                        print(msg); await push_log(msg)
+                        await asyncio.sleep(retry_delay)
+                        retry_delay = min(retry_delay * 2, 30.0)
 
             speaking_watcher_task = asyncio.create_task(_watch_bot_speaking())
 
-            # 10-minute inactivity timeout (resets when candidate speaks)
+            # 10-minute inactivity timeout — resets every time candidate speaks.
+            # last_speech_time is the module-level variable updated by _flush_speech_buffer
+            # and STT_SPEECH_START. Using global ensures all paths share the same clock.
             INACTIVITY_TIMEOUT = 600  # 10 minutes
-            last_speech_time = asyncio.get_event_loop().time()
 
             async def _check_inactivity():
                 """Leave meeting if no candidate speech for 10 minutes."""
-                nonlocal last_speech_time
+                global last_speech_time
                 try:
                     while True:
                         await asyncio.sleep(60)  # Check every minute
@@ -711,7 +743,7 @@ async def join_meeting_and_transcribe(
                             msg = f"⏰ Meeting TIMEOUT ({INACTIVITY_TIMEOUT}s) — no candidate speech"
                             print(msg); await push_log(msg)
                             # Mark as completed
-                            if db:
+                            if mongo_connected:
                                 await db.interviews.update_one(
                                     {"interview_id": interview_id},
                                     {"$set": {
@@ -732,9 +764,65 @@ async def join_meeting_and_transcribe(
 
             inactivity_task = asyncio.create_task(_check_inactivity())
 
+            # Bidirectional interruption: watch for incoming agent transcripts and
+            # pre-gate STT immediately when the agent is ABOUT to speak — faster than
+            # waiting for the bot_speaking change stream because it fires on the
+            # transcript INSERT itself, before arm() + 400ms delay even starts.
+            async def _watch_agent_transcripts():
+                """Pre-gate STT the moment an agent transcript is inserted."""
+                if not mongo_connected or db is None:
+                    return
+
+                pipeline = [
+                    {
+                        "$match": {
+                            "operationType": "insert",
+                            "fullDocument.speaker": "agent",
+                            "fullDocument.interview_id": interview_id,
+                        }
+                    }
+                ]
+
+                retry_delay = 1.0
+                while True:
+                    try:
+                        async with db.transcripts.watch(pipeline, full_document="updateLookup") as stream:
+                            retry_delay = 1.0
+                            async for change in stream:
+                                try:
+                                    # Agent transcript just landed — flush any partial candidate
+                                    # speech and close the STT gate immediately.
+                                    if _speech_buffer.strip():
+                                        msg = "🤖 Agent incoming — flushing partial candidate buffer"
+                                        print(msg); await push_log(msg)
+                                        await _flush_speech_buffer(interview_id)
+
+                                    # Pre-gate STT so we don't capture the start of TTS audio
+                                    if not status_state["bot_speaking"]:
+                                        status_state["bot_speaking"] = True
+                                        try:
+                                            await page.evaluate("window.__tts_started()")
+                                            msg = "🤖 [PRE-GATE] STT closed — agent transcript incoming"
+                                            print(msg); await push_log(msg)
+                                        except Exception as eval_err:
+                                            msg = f"⚠️ Pre-gate eval error: {eval_err}"
+                                            print(msg); await push_log(msg)
+                                except Exception as inner_err:
+                                    msg = f"⚠️ Agent transcript watcher inner error: {inner_err}"
+                                    print(msg); await push_log(msg)
+                    except asyncio.CancelledError:
+                        return
+                    except Exception as e:
+                        msg = f"⚠️ Agent transcript watcher error (retry in {retry_delay}s): {e}"
+                        print(msg); await push_log(msg)
+                        await asyncio.sleep(retry_delay)
+                        retry_delay = min(retry_delay * 2, 30.0)
+
+            agent_transcript_task = asyncio.create_task(_watch_agent_transcripts())
+
             # Run meeting monitor and leave watcher concurrently
             leave_task = asyncio.create_task(
-                _watch_for_leave(interview_id, page)
+                _watch_for_leave(interview_id, page, db, mongo_connected)
             )
 
             # Wait for meeting to end
@@ -743,8 +831,8 @@ async def join_meeting_and_transcribe(
             except asyncio.CancelledError:
                 pass
 
-            # Cancel heartbeat and speaking watcher
-            for task in [heartbeat_task, speaking_watcher_task]:
+            # Cancel all background tasks
+            for task in [heartbeat_task, speaking_watcher_task, agent_transcript_task, inactivity_task]:
                 if task and not task.done():
                     task.cancel()
                     try:
@@ -755,9 +843,9 @@ async def join_meeting_and_transcribe(
             # CRITICAL: Update status when meeting ends naturally
             msg = "Meeting ended — Web Speech API transcription complete"
             print(msg); await push_log(msg)
-            
+
             # Mark interview as completed (bot finished normally)
-            if db:
+            if mongo_connected:
                 try:
                     await db.interviews.update_one(
                         {"interview_id": interview_id},

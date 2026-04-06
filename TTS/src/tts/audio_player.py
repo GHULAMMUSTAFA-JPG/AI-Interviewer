@@ -76,6 +76,14 @@ class AudioPlayer:
                 if not chunk:
                     continue
 
+                # Detect pacat crash early — if it exited we'll get a BrokenPipeError
+                if proc.returncode is not None:
+                    raise RuntimeError(
+                        f"pacat exited unexpectedly with code {proc.returncode} "
+                        f"after {bytes_written} bytes. "
+                        "Check PulseAudio: is VirtualSink still running?"
+                    )
+
                 proc.stdin.write(chunk)
                 await proc.stdin.drain()
                 bytes_written += len(chunk)
@@ -92,6 +100,11 @@ class AudioPlayer:
                 logger.info(f"Playback interrupted ({bytes_written} bytes written)")
             else:
                 await proc.wait()
+                if proc.returncode != 0:
+                    raise RuntimeError(
+                        f"pacat exited with code {proc.returncode} — "
+                        "PulseAudio may be unavailable or VirtualSink is missing"
+                    )
                 logger.info(f"Playback complete ({bytes_written} bytes written)")
 
         except Exception:

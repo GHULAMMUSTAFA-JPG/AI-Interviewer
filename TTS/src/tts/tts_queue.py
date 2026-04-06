@@ -24,12 +24,16 @@ class TranscriptListener:
     async def backfill(self) -> AsyncGenerator[TranscriptDocument, None]:
         """
         Yield any agent transcripts with audio_url=null inserted in the last
-        30 minutes that TTS may have missed during a restart.
+        5 minutes that TTS may have missed during a restart.
 
-        Called once at startup before the change stream opens so that
-        transcripts queued while TTS was down are not permanently skipped.
+        5-minute window (down from 30) avoids double-playing a greeting from
+        an interview that started long ago when TTS restarts in a new session.
+        Transcripts older than 5 min that were never played are likely from a
+        crashed/abandoned interview and should not be replayed.
+
+        Called once at startup before the change stream opens.
         """
-        cutoff = datetime.utcnow() - timedelta(minutes=30)
+        cutoff = datetime.utcnow() - timedelta(minutes=5)
         cursor = self.collection.find(
             {
                 "speaker": "agent",
@@ -47,7 +51,7 @@ class TranscriptListener:
             except Exception as exc:
                 logger.error(f"Backfill parse error: {exc}")
         if count:
-            logger.info(f"Backfill: replayed {count} missed transcript(s)")
+            logger.info(f"Backfill: replaying {count} missed transcript(s) from last 5 min")
         else:
             logger.info("Backfill: no missed transcripts found")
 
@@ -68,9 +72,10 @@ class TranscriptListener:
             }
         ]
         retry_delay = config.mongo_retry_base_delay
-        max_retries = config.mongo_max_retries
 
-        for attempt in range(max_retries):
+        # Retry forever — in production a transient MongoDB blip should not
+        # permanently stop TTS from playing agent responses.
+        while not self._closed:
             try:
                 self._change_stream = self.collection.watch(
                     pipeline,
@@ -78,9 +83,9 @@ class TranscriptListener:
                 )
                 logger.info(
                     f"Watching {config.mongodb_db}.{config.transcripts_collection} "
-                    "for agent utterances"
+                    "for agent utterances (change stream open)"
                 )
-                retry_delay = config.mongo_retry_base_delay  # reset on success
+                retry_delay = config.mongo_retry_base_delay  # reset on successful open
 
                 async for change in self._change_stream:
                     if self._closed:
@@ -98,17 +103,16 @@ class TranscriptListener:
                     except Exception as exc:
                         logger.error(f"Error parsing transcript document: {exc}")
 
+            except asyncio.CancelledError:
+                return
             except Exception as exc:
                 if self._closed:
                     return
                 logger.warning(
-                    f"MongoDB change stream error "
-                    f"(attempt {attempt + 1}/{max_retries}): {exc}"
+                    f"MongoDB change stream error (retry in {retry_delay:.1f}s): {exc}"
                 )
                 await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 30.0)  # exponential backoff
-
-        logger.error("Max MongoDB reconnection attempts reached")
+                retry_delay = min(retry_delay * 2, 30.0)  # exponential backoff, cap 30s
 
     async def close(self) -> None:
         """Close change stream."""

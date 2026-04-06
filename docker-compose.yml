@@ -124,6 +124,14 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '2.0'
+        reservations:
+          memory: 256M
+          cpus: '0.5'
 
   # ────────────────────────────────────────────────────────────────
   # Cleanup Service: Automatically cleans up stuck interviews.
@@ -150,6 +158,14 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+        reservations:
+          memory: 64M
+          cpus: '0.1'
 
   # ────────────────────────────────────────────────────────────────
   # TTS: text-to-speech.
@@ -169,6 +185,9 @@ services:
         condition: service_healthy
     env_file:
       - .env.docker
+    environment:
+      - VIRTUAL_MIC=VirtualSink
+      - PULSE_SERVER=unix:/var/run/pulse/native
     volumes:
       - pulse-socket:/var/run/pulse
     networks:
@@ -180,6 +199,14 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+        reservations:
+          memory: 128M
+          cpus: '0.25'
 
   # ────────────────────────────────────────────────────────────────
   # Meeting-Bot: headless Chrome + caption scraper.
@@ -213,6 +240,14 @@ services:
       timeout: 5s
       retries: 10
       start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 3G        # Chrome + PulseAudio + Playwright (shm_size adds 2G on top)
+          cpus: '2.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
 
   # ────────────────────────────────────────────────────────────────
   # UI: FastAPI web form.
@@ -238,6 +273,14 @@ services:
       timeout: 10s
       retries: 3
       start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+        reservations:
+          memory: 128M
+          cpus: '0.25'
 
 
 # ══════════════════════════════════════════════════════════════════════

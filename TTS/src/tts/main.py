@@ -74,8 +74,15 @@ class TTSService:
             f"Processing transcript: interview={doc.interview_id} chars={len(doc.text)}"
         )
 
-        # Arm: mark bot as speaking, clear stale interrupt, start watching
+        # Arm: mark bot as speaking, clear stale interrupt, start watching.
         await self._interrupt_handler.arm(doc.interview_id)
+
+        # ECHO GUARD RACE FIX: arm() sets bot_speaking=True in MongoDB, but
+        # Meeting-Bot's change stream watcher needs ~100-400ms to propagate that
+        # flag into the browser via page.evaluate("window.__tts_started()").
+        # Without this delay the first words of every utterance are unprotected
+        # and Web Speech API transcribes the agent's own voice as candidate speech.
+        await asyncio.sleep(0.4)
 
         try:
             if doc.audio_data:

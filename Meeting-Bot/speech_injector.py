@@ -21,7 +21,7 @@ SPEECH_INJECTION_SCRIPT = """
 
     // ─── Configuration ───────────────────────────────────────────
     const SILENCE_MS = 1500;       // Save after 1.5s silence (was 2s, faster now)
-    const ECHO_GATE_MS = 700;      // After bot stops, ignore STT for 700ms
+    const ECHO_GATE_MS = 2000;     // After bot stops, ignore STT for 2s (covers echo tail + natural pause)
 
     // ─── Python bridge ───────────────────────────────────────────
     // Python reads these via page.on('console')
