@@ -21,7 +21,7 @@ SPEECH_INJECTION_SCRIPT = """
 
     // ─── Configuration ───────────────────────────────────────────
     const SILENCE_MS = 500;        // Save after 0.5s silence — fast agent response
-    const ECHO_GATE_MS = 2000;     // After bot stops, ignore STT for 2s (covers PulseAudio buffer lag)
+    const ECHO_GATE_MS = 1500;     // After bot stops, ignore STT for 1.5s (sweet spot: covers Google STT queue, minimises candidate speech loss)
 
     // ─── Python bridge ───────────────────────────────────────────
     // Python reads these via page.on('console')

@@ -91,12 +91,47 @@ class TTSService:
         # Arm: mark bot as speaking, clear stale interrupt, start watching.
         await self._interrupt_handler.arm(doc.interview_id)
 
-        # ECHO GUARD RACE FIX: arm() sets bot_speaking=True in MongoDB, but
-        # Meeting-Bot's change stream watcher needs ~100-400ms to propagate that
-        # flag into the browser via page.evaluate("window.__tts_started()").
-        # Without this delay the first words of every utterance are unprotected
-        # and Web Speech API transcribes the agent's own voice as candidate speech.
-        await asyncio.sleep(0.4)
+        # Two-purpose sleep:
+        # 1. Echo guard: arm() sets bot_speaking=True in MongoDB, but Meeting-Bot's
+        #    change stream needs ~100-400ms to propagate to __tts_started() in the
+        #    browser. Without this, the bot's first words play while STT is still
+        #    active and get transcribed as candidate speech.
+        # 2. Stale buffer: any candidate T2 that escaped the pipeline stale check
+        #    (saved within 275ms of this agent response) is in MongoDB by 600ms.
+        #    The stale check below runs after this sleep to catch those.
+        await asyncio.sleep(0.6)
+
+        # STALE CHECK (Position 2 gap):
+        # If the candidate spoke again between the pipeline saving this response and
+        # now, their T2 transcript is already in DB. Playing a stale response would
+        # result in two bot replies back-to-back. Skip instead — the pipeline for T2
+        # will generate a coherent reply using the full conversation context.
+        #
+        # We mark (not delete) R1 so turn count stays accurate. TTS won't retry
+        # because audio_url is no longer null.
+        try:
+            db = self._mongo_client[config.mongodb_db]
+            from bson import ObjectId
+            newer_candidate = await db.transcripts.find_one({
+                "interview_id": doc.interview_id,
+                "speaker": "candidate",
+                "_id": {"$gt": ObjectId(str(doc.id))},
+            })
+            if newer_candidate:
+                logger.info(
+                    f"[STALE TTS] Skipping response {doc.id} — "
+                    f"newer candidate message {newer_candidate['_id']} exists"
+                )
+                await db.transcripts.update_one(
+                    {"_id": ObjectId(str(doc.id))},
+                    {"$set": {"audio_url": "tts_skipped"}},
+                )
+                await self._interrupt_handler.disarm(doc.interview_id)
+                await self._set_tts_status(doc.interview_id, "idle")
+                return
+        except Exception as stale_err:
+            # Never block playback on a failed stale check
+            logger.warning(f"[STALE TTS] Check failed (proceeding): {stale_err}")
 
         try:
             if doc.audio_data:
