@@ -79,6 +79,43 @@
 let currentInterviewId = null;
 let pollingInterval = null;
 
+// ─── Persistent form fields via localStorage ───────────────────────
+const PERSISTED_FIELDS = ['meeting_url', 'job_description', 'company_info'];
+
+function loadPersistedFields() {
+  PERSISTED_FIELDS.forEach(field => {
+    const el = document.getElementById(field);
+    if (el) {
+      const saved = localStorage.getItem('interview_form_' + field);
+      if (saved) el.value = saved;
+    }
+  });
+}
+
+function saveFormToStorage() {
+  PERSISTED_FIELDS.forEach(field => {
+    const el = document.getElementById(field);
+    if (el) localStorage.setItem('interview_form_' + field, el.value);
+  });
+}
+
+// Load saved values on page load
+loadPersistedFields();
+
+// Auto-save on every input change
+PERSISTED_FIELDS.forEach(field => {
+  const el = document.getElementById(field);
+  if (el) {
+    el.addEventListener('input', saveFormToStorage);
+    el.addEventListener('blur', saveFormToStorage);
+  }
+});
+
+// Clear stored form after successful submission
+function clearStoredForm() {
+  PERSISTED_FIELDS.forEach(field => localStorage.removeItem('interview_form_' + field));
+}
+
 document.getElementById('interviewForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = document.getElementById('interviewForm');
@@ -93,6 +130,7 @@ document.getElementById('interviewForm').addEventListener('submit', async (e) =>
     const data = await res.json();
     if (data.status === 'started') {
       currentInterviewId = data.interview_id;
+      clearStoredForm();  // Clear saved fields after successful submit
       document.getElementById('statusBox').style.display = 'block';
       document.getElementById('statusTitle').textContent = 'Interview started';
       document.getElementById('statusDetail').innerHTML =

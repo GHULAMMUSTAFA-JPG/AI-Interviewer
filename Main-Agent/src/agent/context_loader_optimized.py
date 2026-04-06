@@ -127,16 +127,20 @@ async def load_interview_context(
 
         # 5. Build and cache static fields
         cached_context = {
-            "interview_id": interview_id,
-            "candidate_id": "",
-            "job_id": "",
+            "interview_id": interview.get("interview_id", str(interview.get("_id", ""))),
+            "candidate_id": "",  # not used in flat schema
+            "job_id": "",        # not used in flat schema
+            "phase": interview.get("phase", "INTRO"),
+            "turn_count": interview.get("turn_count", 0),
+            "status": interview.get("status", "in_progress"),
             "started_at": interview.get("started_at"),
-            "candidate_name": "Candidate",
+            "candidate_name": interview.get("candidate_name", "Candidate"),
             "candidate_cv": interview.get("candidate_cv", ""),
             "job_description": interview.get("job_description", ""),
             "company_info": interview.get("company_info", ""),
             "required_skills": [],
             "experience_level": "",
+            "conversation_summary": interview.get("conversation_summary", ""),
             "estimated_context_tokens": 0,
         }
         interview_cache[cache_key] = cached_context
@@ -144,10 +148,6 @@ async def load_interview_context(
         # 6. Build complete InterviewContext
         context = InterviewContext(
             **cached_context,
-            phase=interview["phase"],
-            turn_count=interview["turn_count"],
-            status=interview["status"],
-            conversation_summary=interview.get("conversation_summary", ""),
             recent_messages=recent_messages,
             latest_message=latest_message,
         )
