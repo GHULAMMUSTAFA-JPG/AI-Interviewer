@@ -277,7 +277,7 @@ async def list_conversations(request: Request):
     db = _get_db()
     interviews = await db["interviews"].find(
         {},
-        {"interview_id": 1, "status": 1, "started_at": 1, "phase": 1, "turn_count": 1, "_id": 0},
+        {"interview_id": 1, "status": 1, "bot_status": 1, "started_at": 1, "phase": 1, "turn_count": 1, "_id": 0},
     ).sort("started_at", -1).to_list(length=100)
     return templates.TemplateResponse(
         "conversations.html", {"request": request, "interviews": interviews}

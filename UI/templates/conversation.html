@@ -123,6 +123,8 @@
   <span>Started: {{ interview.started_at.strftime('%Y-%m-%d %H:%M') if interview.started_at else '—' }}</span>
   {% if interview.status == 'in_progress' %}
   <span style="color:#28a745">Auto-refreshing every 5s</span>
+  &nbsp;
+  <button onclick="stopInterview()" style="padding:4px 12px;background:#dc3545;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:0.85em;">End Interview</button>
   {% endif %}
 </div>
 

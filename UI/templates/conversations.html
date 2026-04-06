@@ -4,48 +4,139 @@
 <meta charset="UTF-8">
 <title>Interviews — AI Interviewer</title>
 <style>
-  body { font-family: sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; background: #f5f5f5; }
+  body { font-family: sans-serif; max-width: 960px; margin: 40px auto; padding: 0 20px; background: #f5f5f5; }
   h1 { color: #1e3a5f; }
   a { color: #1e3a5f; }
   table { width: 100%; border-collapse: collapse; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.1); }
   th { background: #1e3a5f; color: #fff; padding: 10px 14px; text-align: left; }
-  td { padding: 10px 14px; border-bottom: 1px solid #eee; }
+  td { padding: 10px 14px; border-bottom: 1px solid #eee; vertical-align: middle; }
   tr:hover td { background: #f0f4f8; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.8em; }
   .in_progress { background: #d4edda; color: #155724; }
   .abandoned   { background: #f8d7da; color: #721c24; }
   .completed   { background: #cce5ff; color: #004085; }
-  .nav { margin-bottom: 20px; }
+  .waiting     { background: #fff3cd; color: #856404; }
+  .joining     { background: #e2d9f3; color: #432874; }
+  .admitted    { background: #d1ecf1; color: #0c5460; }
+  .nav { margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; }
+  .end-btn {
+    padding: 4px 12px; background: #dc3545; color: #fff; border: none;
+    border-radius: 5px; cursor: pointer; font-size: 0.82em;
+  }
+  .end-btn:hover { background: #c82333; }
 </style>
 </head>
 <body>
-<div class="nav"><a href="/">← New interview</a></div>
+<div class="nav">
+  <a href="/">← New interview</a>
+  <span id="liveIndicator" style="display:none;font-size:0.85em;color:#28a745;">
+    ● Live — refreshing every 10s
+  </span>
+</div>
 <h1>All Interviews</h1>
 <table>
   <thead>
     <tr>
       <th>Started</th>
       <th>Interview ID</th>
-      <th>Status</th>
+      <th>Meeting Status</th>
+      <th>Bot Status</th>
       <th>Phase</th>
       <th>Turns</th>
       <th></th>
     </tr>
   </thead>
-  <tbody>
+  <tbody id="tableBody">
     {% for iv in interviews %}
-    <tr>
+    <tr id="row-{{ iv.interview_id }}">
       <td>{{ iv.started_at.strftime('%Y-%m-%d %H:%M') if iv.started_at else '—' }}</td>
       <td style="font-size:0.85em; font-family:monospace">{{ iv.interview_id[:16] }}...</td>
       <td><span class="badge {{ iv.status }}">{{ iv.status }}</span></td>
+      <td><span class="badge {{ iv.bot_status or 'pending' }}" id="bot-{{ iv.interview_id }}">{{ iv.bot_status or 'pending' }}</span></td>
       <td>{{ iv.phase or '—' }}</td>
       <td>{{ iv.turn_count or 0 }}</td>
-      <td><a href="/conversation/{{ iv.interview_id }}">View</a></td>
+      <td style="white-space:nowrap">
+        <a href="/conversation/{{ iv.interview_id }}">View</a>
+        {% if iv.status == 'in_progress' %}
+        &nbsp;
+        <button class="end-btn" onclick="endInterview('{{ iv.interview_id }}', this)">End</button>
+        {% endif %}
+      </td>
     </tr>
     {% else %}
-    <tr><td colspan="6" style="text-align:center;color:#888">No interviews yet</td></tr>
+    <tr><td colspan="7" style="text-align:center;color:#888">No interviews yet</td></tr>
     {% endfor %}
   </tbody>
 </table>
+
+<script>
+// Show live indicator and auto-refresh if any interview is in_progress
+const hasLive = document.querySelector('.badge.in_progress') !== null;
+if (hasLive) {
+  document.getElementById('liveIndicator').style.display = 'inline';
+  // Poll status of in_progress rows every 10s
+  setInterval(refreshStatuses, 10000);
+}
+
+async function refreshStatuses() {
+  const inProgressBadges = document.querySelectorAll('td .badge.in_progress');
+  for (const badge of inProgressBadges) {
+    const row = badge.closest('tr');
+    if (!row) continue;
+    const interviewId = row.id.replace('row-', '');
+    try {
+      const res = await fetch(`/status/${interviewId}`);
+      if (!res.ok) continue;
+      const data = await res.json();
+
+      // Update meeting status badge
+      badge.textContent = data.status;
+      badge.className = 'badge ' + data.status;
+
+      // Update bot status badge
+      const botBadge = document.getElementById('bot-' + interviewId);
+      if (botBadge) {
+        botBadge.textContent = data.bot_status || 'pending';
+        botBadge.className = 'badge ' + (data.bot_status || 'pending');
+      }
+
+      // If interview ended, remove the End button and stop tracking
+      if (data.status !== 'in_progress') {
+        const endBtn = row.querySelector('.end-btn');
+        if (endBtn) endBtn.remove();
+      }
+    } catch (e) { /* ignore transient errors */ }
+  }
+}
+
+async function endInterview(interviewId, btn) {
+  if (!confirm('End this interview?')) return;
+  btn.disabled = true;
+  btn.textContent = 'Ending...';
+  try {
+    const res = await fetch(`/stop/${interviewId}`, { method: 'POST' });
+    if (res.ok) {
+      btn.remove();
+      // Update status badge immediately
+      const row = document.getElementById('row-' + interviewId);
+      if (row) {
+        const statusBadge = row.querySelector('td .badge');
+        if (statusBadge) {
+          statusBadge.textContent = 'abandoned';
+          statusBadge.className = 'badge abandoned';
+        }
+      }
+    } else {
+      btn.disabled = false;
+      btn.textContent = 'End';
+      alert('Failed to end interview');
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'End';
+    alert('Error: ' + e.message);
+  }
+}
+</script>
 </body>
 </html>

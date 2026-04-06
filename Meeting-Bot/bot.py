@@ -101,6 +101,31 @@ async def _ensure_mic_on(page) -> None:
     print(msg); await push_log(msg)
 
 
+async def _set_bot_state(interview_id: str, bot_status: str, db=None, mongo_connected: bool = False) -> None:
+    """Write bot_status to both MongoDB and Redis at every state transition."""
+    # MongoDB update
+    if mongo_connected and db is not None:
+        try:
+            await db.interviews.update_one(
+                {"interview_id": interview_id},
+                {"$set": {"bot_status": bot_status, "bot_status_updated_at": datetime.utcnow()}}
+            )
+        except Exception as e:
+            print(f"⚠️  _set_bot_state MongoDB error ({bot_status}): {e}")
+
+    # Redis update
+    try:
+        from redis_client import get_redis, RedisState
+        redis = await get_redis()
+        state = RedisState(redis)
+        await state.set_bot_status(interview_id, bot_status)
+        # Also mirror as meeting status for terminal states
+        if bot_status in ("completed", "abandoned"):
+            await state.set_meeting_status(interview_id, bot_status)
+    except Exception as e:
+        print(f"⚠️  _set_bot_state Redis error ({bot_status}): {e}")
+
+
 async def _disable_camera(page) -> None:
     """Turn off the camera."""
     cam_selectors = [
@@ -156,6 +181,7 @@ async def _watch_for_leave(interview_id: str, page, db=None, mongo_connected=Fal
             except Exception as e:
                 msg = f"❌ Failed to update status: {e}"
                 print(msg); await push_log(msg)
+            await _set_bot_state(interview_id, "abandoned", db, mongo_connected)
 
             # Force leave via Playwright
             try:
@@ -281,13 +307,15 @@ async def join_meeting_and_transcribe(
     (_prefs_dir / "Preferences").write_text(str(_prefs).replace("'", '"'))
 
     mongo_connected = await connect_to_mongo()
-    
+
     # Get the live db reference after connection
     db = mongo_handler.db
-    
+
     if not mongo_connected:
         msg = "⚠️  Continuing without MongoDB (local transcripts only)"
         print(msg); await push_log(msg)
+
+    await _set_bot_state(interview_id, "joining", db, mongo_connected)
 
     async with async_playwright() as p:
         try:
@@ -532,6 +560,7 @@ async def join_meeting_and_transcribe(
             # Wait for admittance
             msg = "⏳ Waiting for host to admit (up to 10 min)..."
             print(msg); await push_log(msg)
+            await _set_bot_state(interview_id, "waiting", db, mongo_connected)
             admitted = False
             admission_start = asyncio.get_event_loop().time()
             admission_timeout = 120  # 2 minutes max for admission
@@ -579,6 +608,7 @@ async def join_meeting_and_transcribe(
                         )
                         msg = "✅ Marked as abandoned in MongoDB"
                         print(msg); await push_log(msg)
+                    await _set_bot_state(interview_id, "abandoned", db, mongo_connected)
                     
                     await ctx.close()
                     return
@@ -603,22 +633,13 @@ async def join_meeting_and_transcribe(
 
             # Signal interview-agent to send greeting (after proper delay)
             try:
-                from motor.motor_asyncio import AsyncIOMotorClient as _MotorClient
-                _int_uri = os.getenv("MONGODB_URI", "mongodb://mongodb:27017/?replicaSet=rs0")
-                _int_db  = os.getenv("MONGODB_DB", "interviews")
-                _ic = _MotorClient(_int_uri, serverSelectionTimeoutMS=5000)
-                
                 # Wait 2 seconds for bot to fully join meeting audio
                 msg = "⏳ Waiting 2 seconds before greeting..."
                 print(msg); await push_log(msg)
                 await page.wait_for_timeout(2000)
-                
-                await _ic[_int_db]["interviews"].update_one(
-                    {"interview_id": interview_id},
-                    {"$set": {"bot_status": "admitted"}},
-                )
-                _ic.close()
-                await push_log(f"✅ bot_status=admitted → greeting will trigger")
+
+                await _set_bot_state(interview_id, "admitted", db, mongo_connected)
+                await push_log("✅ bot_status=admitted → greeting will trigger")
             except Exception as _dbe:
                 await push_log(f"⚠️  Failed to set bot_status: {_dbe}")
 
@@ -752,6 +773,7 @@ async def join_meeting_and_transcribe(
                                         "abandon_reason": f"inactivity_timeout ({INACTIVITY_TIMEOUT}s)"
                                     }}
                                 )
+                            await _set_bot_state(interview_id, "completed", db, mongo_connected)
                             # Cancel leave task to trigger cleanup
                             if leave_task and not leave_task.done():
                                 leave_task.cancel()
@@ -859,6 +881,7 @@ async def join_meeting_and_transcribe(
                 except Exception as e:
                     msg = f"⚠️  Failed to update status: {e}"
                     print(msg); await push_log(msg)
+            await _set_bot_state(interview_id, "completed", db, mongo_connected)
 
             # Final cleanup - save any remaining buffered speech
             if _speech_buffer.strip():
