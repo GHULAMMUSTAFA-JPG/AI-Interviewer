@@ -30,8 +30,10 @@
   }
   .in_progress { background: #d4edda; color: #155724; }
   .admitted    { background: #cce5ff; color: #004085; }
+  .in_meeting  { background: #d1ecf1; color: #0c5460; }
   .waiting     { background: #fff3cd; color: #856404; }
   .ended       { background: #f8d7da; color: #721c24; }
+  .completed   { background: #f8d7da; color: #721c24; }
   .stop-btn {
     margin-top: 12px; padding: 8px 16px; background: #dc3545; color: #fff;
     border: none; border-radius: 6px; cursor: pointer; font-size: 0.9em;
@@ -121,6 +123,10 @@ document.getElementById('interviewForm').addEventListener('submit', async (e) =>
   const form = document.getElementById('interviewForm');
   const formData = new FormData(form);
 
+  // Stop any previous polling before starting a new interview
+  if (pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
+  currentInterviewId = null;
+
   const btn = form.querySelector('button[type=submit]');
   btn.disabled = true;
   btn.textContent = 'Starting...';
@@ -135,6 +141,8 @@ document.getElementById('interviewForm').addEventListener('submit', async (e) =>
       document.getElementById('statusTitle').textContent = 'Interview started';
       document.getElementById('statusDetail').innerHTML =
         `ID: <code>${data.interview_id}</code><br>Waiting for bot to join...`;
+      // Always reset stop button visibility when a new interview starts
+      document.getElementById('stopBtn').style.display = '';
       startPolling();
     }
   } catch (err) {
@@ -161,10 +169,15 @@ function startPolling() {
         <small>Updated: ${new Date().toLocaleTimeString()}</small>
       `;
 
-      if (meetingStatus === 'ended' || meetingStatus === 'abandoned' || botStatus === 'completed') {
+      if (meetingStatus === 'ended' || meetingStatus === 'abandoned' || botStatus === 'completed' || botStatus === 'abandoned') {
         clearInterval(pollingInterval);
+        pollingInterval = null;
         detail.innerHTML += '<br><strong>Interview ended.</strong>';
         document.getElementById('stopBtn').style.display = 'none';
+        // Re-enable form so user can start a new interview
+        const btn = document.querySelector('button[type=submit]');
+        btn.disabled = false;
+        btn.textContent = 'Start Interview';
       }
     } catch (e) {
       console.error('Polling error:', e);

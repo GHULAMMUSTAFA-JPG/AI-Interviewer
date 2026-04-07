@@ -169,19 +169,30 @@ async def _watch_new_interviews(db, shutdown_event: asyncio.Event) -> None:
 
                     logger.info(f"[BOT ADMITTED] {interview_id} — waiting 5 seconds before inserting greeting")
 
-                    # PRE-WARM: Load interview context into cache before candidate speaks
+                    # PRE-WARM: Load complete interview context into cache before candidate speaks.
+                    # Must include ALL required fields for InterviewContext to avoid crashes.
                     try:
                         interview_doc = await db.interviews.find_one({"interview_id": interview_id})
                         if interview_doc:
-                            # Pre-load context so first response is faster
                             from src.config import interview_cache
                             cache_key = f"context_{interview_id}"
                             if cache_key not in interview_cache:
                                 interview_cache[cache_key] = {
+                                    "interview_id": interview_id,
+                                    "candidate_id": "",
+                                    "job_id": "",
+                                    "phase": interview_doc.get("phase", "INTRO"),
+                                    "turn_count": interview_doc.get("turn_count", 0),
+                                    "status": interview_doc.get("status", "in_progress"),
+                                    "started_at": interview_doc.get("started_at"),
+                                    "candidate_name": "Candidate",
+                                    "candidate_cv": interview_doc.get("candidate_cv", ""),
                                     "job_description": interview_doc.get("job_description", ""),
                                     "company_info": interview_doc.get("company_info", ""),
-                                    "candidate_cv": interview_doc.get("candidate_cv", ""),
-                                    "loaded_at": datetime.utcnow()
+                                    "required_skills": [],
+                                    "experience_level": "",
+                                    "conversation_summary": interview_doc.get("conversation_summary", ""),
+                                    "estimated_context_tokens": 0,
                                 }
                                 logger.info(f"[CONTEXT PRE-WARMED] {interview_id}")
                     except Exception as ctx_exc:

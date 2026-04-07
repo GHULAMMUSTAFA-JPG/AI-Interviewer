@@ -119,9 +119,16 @@ async def _set_bot_state(interview_id: str, bot_status: str, db=None, mongo_conn
         redis = await get_redis()
         state = RedisState(redis)
         await state.set_bot_status(interview_id, bot_status)
-        # Also mirror as meeting status for terminal states
-        if bot_status in ("completed", "abandoned"):
-            await state.set_meeting_status(interview_id, bot_status)
+        # Mirror bot_status → meeting status so UI shows meaningful labels
+        _meeting_status_map = {
+            "joining":   "preparing",
+            "waiting":   "waiting",    # bot in lobby
+            "admitted":  "in_meeting", # bot inside the call
+            "completed": "completed",
+            "abandoned": "abandoned",
+        }
+        if bot_status in _meeting_status_map:
+            await state.set_meeting_status(interview_id, _meeting_status_map[bot_status])
     except Exception as e:
         print(f"⚠️  _set_bot_state Redis error ({bot_status}): {e}")
 
@@ -203,19 +210,42 @@ async def _watch_for_leave(interview_id: str, page, db=None, mongo_connected=Fal
             if not mongo_connected or db is None:
                 continue
 
+            # Check if Google Meet removed us (leave button gone + removal message)
+            try:
+                leave_visible = await page.locator('button[aria-label="Leave call"]').count()
+                if leave_visible == 0:
+                    body = await page.evaluate("() => document.body.innerText.toLowerCase()")
+                    removal_phrases = ["you've been removed", "you were removed", "removed from",
+                                       "meeting has ended", "meeting ended", "left the meeting"]
+                    if any(p in body for p in removal_phrases):
+                        msg = "🚨 Google Meet removed bot from the call — marking abandoned"
+                        print(msg); await push_log(msg)
+                        try:
+                            await db.interviews.update_one(
+                                {"interview_id": interview_id},
+                                {"$set": {"status": "abandoned", "ended_at": datetime.utcnow(),
+                                          "abandon_reason": "host_removed_bot"}},
+                            )
+                        except Exception:
+                            pass
+                        await _set_bot_state(interview_id, "abandoned", db, mongo_connected)
+                        return
+            except Exception:
+                pass
+
             interview = await db.interviews.find_one(
                 {"interview_id": interview_id},
                 projection={"status": 1}
             )
-            
+
             current_status = interview.get("status") if interview else None
-            
+
             # Log status changes
             if current_status != last_status_check:
                 msg = f"📊 Status check: {current_status} (was: {last_status_check})"
                 print(msg); await push_log(msg)
                 last_status_check = current_status
-            
+
             if interview and current_status in ("abandoned", "completed"):
                 msg = f"🚨 Interview ENDED (status={current_status}) — leaving IMMEDIATELY"
                 print(msg); await push_log(msg)
@@ -480,6 +510,27 @@ async def join_meeting_and_transcribe(
             page.on('console', _handle_console)
             page.on('pageerror', lambda err: print(f"[PAGE ERROR] {err}"))
 
+            async def _on_page_navigated(frame):
+                """Detect when Chrome navigates away from Google Meet (host removed bot)."""
+                if frame != page.main_frame:
+                    return
+                url = page.url
+                if "meet.google.com" not in url and url not in ("about:blank", ""):
+                    msg = f"🚨 Page navigated away from Meet → {url} — bot was removed"
+                    print(msg); await push_log(msg)
+                    if mongo_connected and db is not None:
+                        try:
+                            await db.interviews.update_one(
+                                {"interview_id": interview_id},
+                                {"$set": {"status": "abandoned", "ended_at": datetime.utcnow(),
+                                          "abandon_reason": "host_removed_bot"}},
+                            )
+                        except Exception:
+                            pass
+                    await _set_bot_state(interview_id, "abandoned", db, mongo_connected)
+
+            page.on('framenavigated', _on_page_navigated)
+
             # ── Inject init script: block devicechange ───
             await page.add_init_script("""
 (function blockDeviceChange() {
@@ -587,8 +638,8 @@ async def join_meeting_and_transcribe(
                         
                     # Check if meeting ended/denied
                     body = await page.evaluate("() => document.body.innerText.toLowerCase()")
-                    if any(x in body for x in ["not found", "has ended", "denied"]):
-                        msg = "❌ Denied or meeting ended during wait"
+                    if any(x in body for x in ["not found", "has ended", "denied", "removed from"]):
+                        msg = "❌ Denied or removed or meeting ended during wait"
                         print(msg); await push_log(msg)
                         await ctx.close()
                         return
@@ -636,10 +687,81 @@ async def join_meeting_and_transcribe(
                 msg = f"⚠️  Failed to switch to BotMic: {e}"
                 print(msg); await push_log(msg)
 
-            # Wait 2 seconds for audio routing to stabilize
+            # Ensure VirtualSink is still the default output sink (belt-and-suspenders)
+            # Chrome may have changed the default or created its sink input on a different sink.
+            try:
+                await asyncio.create_subprocess_exec(
+                    "pactl", "set-default-sink", "VirtualSink",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+            except Exception:
+                pass
+
+            # Wait 2 seconds for audio to stabilize + Chrome to create its sink inputs
             msg = "⏳ Waiting 2 seconds for audio to stabilize..."
             print(msg); await push_log(msg)
             await page.wait_for_timeout(2000)
+
+            async def _route_all_sink_inputs_to_virtualsink() -> int:
+                """
+                Move every PulseAudio sink input to VirtualSink.
+
+                Chrome creates one or more sink inputs for WebRTC audio (incoming
+                participant voices). They don't automatically land on VirtualSink even
+                though it's the default — Chrome may have created them earlier or on a
+                different sink. Moving them here ensures VirtualSink.monitor (= BotMic)
+                sees all meeting audio so Web Speech API can transcribe participants.
+
+                Returns the number of inputs moved.
+                """
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        "pactl", "list", "short", "sink-inputs",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout, _ = await proc.communicate()
+                    lines = [l.strip() for l in stdout.decode().splitlines() if l.strip()]
+                    moved = 0
+                    for line in lines:
+                        sink_input_id = line.split()[0]
+                        mv = await asyncio.create_subprocess_exec(
+                            "pactl", "move-sink-input", sink_input_id, "VirtualSink",
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                        _, err = await mv.communicate()
+                        if mv.returncode == 0:
+                            moved += 1
+                        else:
+                            err_text = err.decode().strip()
+                            if err_text:
+                                print(f"⚠️  move-sink-input {sink_input_id}: {err_text}")
+                    return moved
+                except Exception as e:
+                    print(f"⚠️  _route_all_sink_inputs error: {e}")
+                    return 0
+
+            # Initial route: move any sink inputs Chrome already created
+            n = await _route_all_sink_inputs_to_virtualsink()
+            msg = f"🔊 Audio routing: moved {n} sink input(s) to VirtualSink"
+            print(msg); await push_log(msg)
+
+            # Periodic re-route: Chrome creates NEW sink inputs as WebRTC streams change
+            # (participants join, un-mute, etc.) — re-run every 8 seconds to catch them.
+            async def _periodic_audio_routing():
+                try:
+                    while True:
+                        await asyncio.sleep(8)
+                        n = await _route_all_sink_inputs_to_virtualsink()
+                        if n > 0:
+                            print(f"🔊 [AUDIO RE-ROUTE] moved {n} sink input(s) to VirtualSink")
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    print(f"⚠️  Periodic audio routing error: {e}")
+
+            audio_routing_task = asyncio.create_task(_periodic_audio_routing())
 
             # Inject Web Speech API BEFORE setting admitted.
             # This ensures the echo gate is armed via _watch_agent_transcripts
@@ -827,22 +949,20 @@ async def join_meeting_and_transcribe(
                             async for change in stream:
                                 try:
                                     # Agent transcript just landed — flush any partial candidate
-                                    # speech and close the STT gate immediately.
+                                    # speech before the bot starts responding.
                                     if _speech_buffer.strip():
                                         msg = "🤖 Agent incoming — flushing partial candidate buffer"
                                         print(msg); await push_log(msg)
                                         await _flush_speech_buffer(interview_id)
-
-                                    # Pre-gate STT so we don't capture the start of TTS audio
-                                    if not status_state["bot_speaking"]:
-                                        status_state["bot_speaking"] = True
-                                        try:
-                                            await page.evaluate("window.__tts_started()")
-                                            msg = "🤖 [PRE-GATE] STT closed — agent transcript incoming"
-                                            print(msg); await push_log(msg)
-                                        except Exception as eval_err:
-                                            msg = f"⚠️ Pre-gate eval error: {eval_err}"
-                                            print(msg); await push_log(msg)
+                                    # Gate STT immediately so the bot's voice isn't transcribed.
+                                    # The TTS arm() call will also set bot_speaking=True in MongoDB,
+                                    # but that takes 100-400ms to propagate via change stream.
+                                    # Calling __tts_started() here closes the gap to ~0ms.
+                                    try:
+                                        await page.evaluate("window.__tts_started()")
+                                    except Exception as eval_err:
+                                        msg = f"⚠️ __tts_started (agent tx) eval error: {eval_err}"
+                                        print(msg); await push_log(msg)
                                 except Exception as inner_err:
                                     msg = f"⚠️ Agent transcript watcher inner error: {inner_err}"
                                     print(msg); await push_log(msg)
@@ -868,7 +988,7 @@ async def join_meeting_and_transcribe(
                 pass
 
             # Cancel all background tasks
-            for task in [heartbeat_task, speaking_watcher_task, agent_transcript_task, inactivity_task]:
+            for task in [heartbeat_task, speaking_watcher_task, agent_transcript_task, inactivity_task, audio_routing_task]:
                 if task and not task.done():
                     task.cancel()
                     try:
