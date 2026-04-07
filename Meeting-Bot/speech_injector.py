@@ -18,7 +18,7 @@ SPEECH_INJECTION_SCRIPT = """
     let restartBackoff  = 1500;   // ms — doubles on 'aborted', resets on success
 
     // ─── Constants ───────────────────────────────────────────────
-    const SILENCE_MS     = 1000;  // ms of silence after last confirmed word → save
+    const SILENCE_MS     = 500;   // ms of silence after last confirmed word → save
     const ECHO_GATE_MS   = 1500;  // ms to ignore STT after bot stops (covers Google STT queue)
     const MAX_SPEECH_MS  = 25000; // ms — force-save when onspeechend never fires (bg noise)
     const MIN_CONFIDENCE = 0.55;  // discard finals below this; 0 = not reported → keep

@@ -186,7 +186,7 @@ services:
     env_file:
       - .env.docker
     environment:
-      - VIRTUAL_MIC=VirtualSink
+      - VIRTUAL_MIC=virtual_mic
       - PULSE_SERVER=unix:/var/run/pulse/native
     volumes:
       - pulse-socket:/var/run/pulse

@@ -75,15 +75,13 @@ else
     sleep 1
 fi
 
-# Boost VirtualSink output volume so TTS audio is clearly audible in the meeting
+# Boost VirtualSink output volume so TTS audio is clearly audible
 pactl set-sink-volume VirtualSink 150% && log "✅ VirtualSink volume set to 150%" || log "⚠️  Could not set VirtualSink volume"
 
-# Bridge TTS audio (VirtualSink.monitor) to virtual_mic sink so Chrome's
-# WebRTC microphone input picks it up and sends it to Google Meet.
-# Without this, TTS plays into VirtualSink (null-sink) and participants hear nothing.
-pactl load-module module-loopback sink=virtual_mic source=VirtualSink.monitor \
-    && log "✅ TTS audio bridged to virtual_mic (meeting participants will hear bot)" \
-    || log "⚠️  Could not create TTS→meeting loopback"
+# NOTE: TTS audio now plays directly to virtual_mic sink (not VirtualSink).
+# This sends bot's voice to Chrome's microphone input for Google Meet,
+# while keeping VirtualSink clean for STT echo monitoring.
+# No loopback module needed — avoids audio quality degradation.
 
 # AFTER PulseAudio starts, start keep-alive for virtual_mic (matches other project)
 log "Starting virtual_mic keep-alive (silence)..."

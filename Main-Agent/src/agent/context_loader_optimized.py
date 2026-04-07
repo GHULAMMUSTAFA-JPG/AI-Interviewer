@@ -128,14 +128,14 @@ async def load_interview_context(
             for msg in recent_messages
         ]
 
-        # 5. Build and cache static fields
+        # 5. Cache STATIC fields only (CV, JD, company, candidate).
+        # Dynamic fields (phase, turn_count, status, conversation_summary) are NOT
+        # cached — they're fetched fresh on every call to avoid stale reads, and
+        # passed explicitly so **cached_context never conflicts with keyword args.
         cached_context = {
             "interview_id": interview.get("interview_id", str(interview.get("_id", ""))),
             "candidate_id": "",  # not used in flat schema
             "job_id": "",        # not used in flat schema
-            "phase": interview.get("phase", "INTRO"),
-            "turn_count": interview.get("turn_count", 0),
-            "status": interview.get("status", "in_progress"),
             "started_at": interview.get("started_at"),
             "candidate_name": interview.get("candidate_name", "Candidate"),
             "candidate_cv": interview.get("candidate_cv", ""),
@@ -143,14 +143,17 @@ async def load_interview_context(
             "company_info": interview.get("company_info", ""),
             "required_skills": [],
             "experience_level": "",
-            "conversation_summary": interview.get("conversation_summary", ""),
             "estimated_context_tokens": 0,
         }
         interview_cache[cache_key] = cached_context
 
-        # 6. Build complete InterviewContext
+        # 6. Build complete InterviewContext (static from cache + dynamic from DB)
         context = InterviewContext(
             **cached_context,
+            phase=interview.get("phase", "INTRO"),
+            turn_count=interview.get("turn_count", 0),
+            status=interview.get("status", "in_progress"),
+            conversation_summary=interview.get("conversation_summary", ""),
             recent_messages=recent_messages,
             latest_message=latest_message,
         )

@@ -16,7 +16,7 @@ import signal
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 
-from bot import join_meeting_and_transcribe
+from join_meeting import join_meeting_and_transcribe
 from logger import push_log
 from redis_client import get_redis, RedisState, close_redis
 
