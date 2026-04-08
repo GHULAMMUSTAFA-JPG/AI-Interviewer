@@ -377,29 +377,90 @@ async def join_meeting_and_transcribe(
             msg = "✅ Admitted to meeting!"
             print(msg); await push_log(msg)
 
-            # CRITICAL FIX: Do NOT switch default source to BotMic.
-            # Chrome's WebRTC mic input uses the default source. If we switch to BotMic,
-            # Chrome reads from VirtualSink.monitor (meeting audio) instead of
-            # virtual_mic.monitor (TTS audio) → candidate can't hear the bot.
+            # ════════════════════════════════════════════════════════════
+            # AUDIO ROUTING — THE FINAL CORRECT SETUP
+            # ════════════════════════════════════════════════════════════
             #
-            # STT (Web Speech API) uses BotMic internally via recognition.start()
-            # which picks up the current default source at that moment.
-            # We set it to BotMic right before injecting STT, then switch back.
+            # Goal 1: Chrome WebRTC mic reads TTS audio (virtual_mic_source)
+            #         → Candidate hears the bot in the meeting
+            #
+            # Goal 2: Web Speech API reads meeting audio (BotMic)
+            #         → STT captures other participants' speech
+            #
+            # How:
+            #   1. Default source = virtual_mic_source (set by entrypoint.sh)
+            #   2. Chrome starts → opens mic on virtual_mic_source
+            #   3. After admission: route Chrome output → VirtualSink
+            #   4. Switch default source → BotMic (only affects NEW streams)
+            #   5. Verify Chrome mic is STILL on virtual_mic_source
+            #   6. Inject Web Speech API → uses BotMic (new default)
+            # ════════════════════════════════════════════════════════════
+
             msg = "⏳ Waiting 2 seconds for audio to stabilize..."
             print(msg); await push_log(msg)
             await page.wait_for_timeout(2000)
 
-            # Route Chrome's WebRTC sink inputs to VirtualSink (one-time at admission).
-            # This ensures meeting audio (other participants) goes to VirtualSink.
+            # Step 1: Route Chrome WebRTC output → VirtualSink (meeting audio)
             n = await _route_all_sink_inputs_to_virtualsink()
             msg = f"🔊 Audio routing: moved {n} sink input(s) to VirtualSink"
             print(msg); await push_log(msg)
 
-            # Inject Web Speech API (STT) — BotMic will be used for recognition
+            # Step 2: Switch default source → BotMic
+            # This ONLY affects NEW streams (like Web Speech API).
+            # Chrome's existing WebRTC mic stream stays on virtual_mic_source
+            # (verified in step 3).
+            try:
+                result = await asyncio.create_subprocess_exec(
+                    "pactl", "set-default-source", "BotMic",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await result.communicate()
+                msg = f"✅ Switched default source to BotMic (for STT only)"
+                print(msg); await push_log(msg)
+            except Exception as e:
+                msg = f"⚠️  Failed to switch to BotMic: {e}"
+                print(msg); await push_log(msg)
+
+            # Step 3: Verify Chrome's mic source-output is on virtual_mic_source
+            # If switching default source moved Chrome's stream, force it back.
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "pactl", "list", "short", "source-outputs",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await proc.communicate()
+                lines = stdout.decode().strip().splitlines()
+                for line in lines:
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        source_output_id = parts[0]
+                        source_idx = parts[2]
+                        # VirtualSink.monitor = 0, virtual_mic.monitor = 2
+                        # virtual_mic_source = 3 (index in sources list)
+                        # We need Chrome on source index 3 (virtual_mic_source)
+                        # or on source index 2 (virtual_mic.monitor)
+                        if source_idx not in ("2", "3"):
+                            msg = f"🔧 Chrome source-output #{source_output_id} on wrong source ({source_idx}), moving to virtual_mic_source (3)"
+                            print(msg); await push_log(msg)
+                            mv = await asyncio.create_subprocess_exec(
+                                "pactl", "move-source-output", source_output_id, "3",
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE,
+                            )
+                            await mv.communicate()
+                            msg = f"✅ Moved Chrome source-output to virtual_mic_source"
+                            print(msg); await push_log(msg)
+            except Exception as e:
+                msg = f"⚠️  Audio routing verification skipped: {e}"
+                print(msg)
+
+            # Step 4: Inject Web Speech API → uses BotMic (new default source)
             msg = "🎤 Injecting Web Speech API..."
             print(msg); await push_log(msg)
             await inject_speech_recognition(page, session_id, STT_LANGUAGE)
-            msg = "✅ Web Speech API active"
+            msg = "✅ Web Speech API active (capturing meeting audio via BotMic)"
             print(msg); await push_log(msg)
 
             # Short delay to let STT initialize
@@ -437,17 +498,44 @@ async def join_meeting_and_transcribe(
             heartbeat_task = asyncio.create_task(_send_heartbeat())
 
             # FIX: Periodic audio routing maintenance — Chrome creates new sink-inputs
-            # dynamically when new audio streams start. Without periodic re-routing,
-            # these new inputs bypass VirtualSink and BotMic, so STT doesn't hear them.
+            # and source-outputs dynamically. Without periodic verification,
+            # Chrome's mic might drift to the wrong source.
             async def _maintain_audio_routing():
-                """Re-route Chrome sink-inputs to VirtualSink every 5 seconds."""
+                """Verify and fix audio routing every 5 seconds."""
                 try:
                     while True:
                         await asyncio.sleep(5)
+                        # Re-route sink-inputs (Chrome output → VirtualSink)
                         n = await _route_all_sink_inputs_to_virtualsink()
                         if n > 0:
                             msg = f"🔊 Audio routing: re-routed {n} sink-input(s) to VirtualSink"
                             print(msg); await push_log(msg)
+
+                        # Verify source-outputs (Chrome mic → virtual_mic_source)
+                        try:
+                            proc = await asyncio.create_subprocess_exec(
+                                "pactl", "list", "short", "source-outputs",
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE,
+                            )
+                            stdout, _ = await proc.communicate()
+                            lines = stdout.decode().strip().splitlines()
+                            for line in lines:
+                                parts = line.split()
+                                if len(parts) >= 3:
+                                    source_output_id = parts[0]
+                                    source_idx = parts[2]
+                                    if source_idx not in ("2", "3"):
+                                        msg = f"🔧 Chrome source-output #{source_output_id} drifted to source {source_idx}, fixing"
+                                        print(msg); await push_log(msg)
+                                        mv = await asyncio.create_subprocess_exec(
+                                            "pactl", "move-source-output", source_output_id, "3",
+                                            stdout=asyncio.subprocess.PIPE,
+                                            stderr=asyncio.subprocess.PIPE,
+                                        )
+                                        await mv.communicate()
+                        except Exception:
+                            pass
                 except asyncio.CancelledError:
                     pass
                 except Exception as e:
