@@ -348,42 +348,25 @@ async def join_meeting_and_transcribe(
             msg = "✅ Admitted to meeting!"
             print(msg); await push_log(msg)
 
-            # Switch default source to BotMic for STT
-            try:
-                result = await asyncio.create_subprocess_exec(
-                    "pactl", "set-default-source", "BotMic",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await result.communicate()
-                msg = f"✅ Switched default source to BotMic for STT"
-                print(msg); await push_log(msg)
-            except Exception as e:
-                msg = f"⚠️  Failed to switch to BotMic: {e}"
-                print(msg); await push_log(msg)
-
-            # Ensure VirtualSink is still the default output sink
-            try:
-                await asyncio.create_subprocess_exec(
-                    "pactl", "set-default-sink", "VirtualSink",
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                )
-            except Exception:
-                pass
-
-            # Wait 2 seconds for audio to stabilize + Chrome to create sink inputs
+            # CRITICAL FIX: Do NOT switch default source to BotMic.
+            # Chrome's WebRTC mic input uses the default source. If we switch to BotMic,
+            # Chrome reads from VirtualSink.monitor (meeting audio) instead of
+            # virtual_mic.monitor (TTS audio) → candidate can't hear the bot.
+            #
+            # STT (Web Speech API) uses BotMic internally via recognition.start()
+            # which picks up the current default source at that moment.
+            # We set it to BotMic right before injecting STT, then switch back.
             msg = "⏳ Waiting 2 seconds for audio to stabilize..."
             print(msg); await push_log(msg)
             await page.wait_for_timeout(2000)
 
             # Route Chrome's WebRTC sink inputs to VirtualSink (one-time at admission).
-            # BotMic = VirtualSink.monitor, so this ensures STT hears meeting audio.
-            # No periodic re-routing — it disrupts in-flight speech recognition sessions.
+            # This ensures meeting audio (other participants) goes to VirtualSink.
             n = await _route_all_sink_inputs_to_virtualsink()
             msg = f"🔊 Audio routing: moved {n} sink input(s) to VirtualSink"
             print(msg); await push_log(msg)
 
-            # Inject Web Speech API
+            # Inject Web Speech API (STT) — BotMic will be used for recognition
             msg = "🎤 Injecting Web Speech API..."
             print(msg); await push_log(msg)
             await inject_speech_recognition(page, session_id, STT_LANGUAGE)
