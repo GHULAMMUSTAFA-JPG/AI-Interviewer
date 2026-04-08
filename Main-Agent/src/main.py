@@ -170,7 +170,9 @@ async def _watch_new_interviews(db, shutdown_event: asyncio.Event) -> None:
                     logger.info(f"[BOT ADMITTED] {interview_id} — waiting 5 seconds before inserting greeting")
 
                     # PRE-WARM: Load complete interview context into cache before candidate speaks.
-                    # Must include ALL required fields for InterviewContext to avoid crashes.
+                    # Only store STATIC fields (CV, JD, company). Dynamic fields (phase, turn_count,
+                    # status, conversation_summary) are fetched fresh by the context loader — storing
+                    # them here causes "got multiple values for keyword argument 'phase'" crash.
                     try:
                         interview_doc = await db.interviews.find_one({"interview_id": interview_id})
                         if interview_doc:
@@ -178,12 +180,10 @@ async def _watch_new_interviews(db, shutdown_event: asyncio.Event) -> None:
                             cache_key = f"context_{interview_id}"
                             if cache_key not in interview_cache:
                                 interview_cache[cache_key] = {
+                                    # Static fields only — NO phase, turn_count, status, conversation_summary
                                     "interview_id": interview_id,
                                     "candidate_id": "",
                                     "job_id": "",
-                                    "phase": interview_doc.get("phase", "INTRO"),
-                                    "turn_count": interview_doc.get("turn_count", 0),
-                                    "status": interview_doc.get("status", "in_progress"),
                                     "started_at": interview_doc.get("started_at"),
                                     "candidate_name": "Candidate",
                                     "candidate_cv": interview_doc.get("candidate_cv", ""),
@@ -191,7 +191,6 @@ async def _watch_new_interviews(db, shutdown_event: asyncio.Event) -> None:
                                     "company_info": interview_doc.get("company_info", ""),
                                     "required_skills": [],
                                     "experience_level": "",
-                                    "conversation_summary": interview_doc.get("conversation_summary", ""),
                                     "estimated_context_tokens": 0,
                                 }
                                 logger.info(f"[CONTEXT PRE-WARMED] {interview_id}")

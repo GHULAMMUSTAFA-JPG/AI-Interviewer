@@ -35,23 +35,51 @@ STT_LANGUAGE = os.getenv("STT_LANGUAGE", "en-US")
 
 async def _route_all_sink_inputs_to_virtualsink() -> int:
     """
-    Move every PulseAudio sink input to VirtualSink.
-    
-    NOTE: This approach has proven unreliable (move-sink-input failures).
-    Chrome's WebRTC audio may bypass PulseAudio entirely in Docker.
-    Consider alternative approaches if meeting audio isn't reaching STT.
+    Move Chrome's PulseAudio sink inputs to VirtualSink.
+
+    Skips pacat sink inputs — those are TTS audio that must stay on
+    virtual_mic so they flow: virtual_mic → virtual_mic.monitor →
+    Chrome WebRTC mic input → meeting participants can hear the bot.
+
+    Only Chrome's WebRTC output (participant voices) should go to
+    VirtualSink so STT can read from VirtualSink.monitor.
     """
     try:
         proc = await asyncio.create_subprocess_exec(
-            "pactl", "list", "short", "sink-inputs",
+            "pactl", "list", "sink-inputs",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, _ = await proc.communicate()
-        lines = [l.strip() for l in stdout.decode().splitlines() if l.strip()]
+        output = stdout.decode()
+
+        # Parse full sink-inputs output: extract id and application.name
+        current_id = None
+        current_app = None
+        sink_inputs = []  # list of (id, app_name)
+
+        for line in output.splitlines():
+            line = line.strip()
+            if line.startswith("Sink Input #"):
+                if current_id is not None:
+                    sink_inputs.append((current_id, current_app or ""))
+                current_id = line.split("#")[1].strip()
+                current_app = None
+            elif "application.name" in line and "=" in line:
+                # Format: application.name = "pacat" or "Chromium input"
+                current_app = line.split("=", 1)[1].strip().strip('"')
+
+        if current_id is not None:
+            sink_inputs.append((current_id, current_app or ""))
+
         moved = 0
-        for line in lines:
-            sink_input_id = line.split()[0]
+        for sink_input_id, app_name in sink_inputs:
+            # Skip pacat — that's TTS audio playing on virtual_mic.
+            # Moving it to VirtualSink would send bot speech to STT instead of
+            # to Chrome's mic, so meeting participants would never hear the bot.
+            if "pacat" in app_name.lower():
+                continue
+
             mv = await asyncio.create_subprocess_exec(
                 "pactl", "move-sink-input", sink_input_id, "VirtualSink",
                 stdout=asyncio.subprocess.PIPE,
@@ -60,6 +88,7 @@ async def _route_all_sink_inputs_to_virtualsink() -> int:
             _, err = await mv.communicate()
             if mv.returncode == 0:
                 moved += 1
+
         return moved
     except Exception as e:
         print(f"⚠️  _route_all_sink_inputs error: {e}")
@@ -434,10 +463,14 @@ async def join_meeting_and_transcribe(
                     while True:
                         await asyncio.sleep(10)
                         try:
-                            is_active = await page.evaluate("() => typeof window.__speechActive !== 'undefined' && window.__speechActive")
-                            is_running = await page.evaluate("() => typeof isRunning !== 'undefined' && isRunning")
-                            backoff = await page.evaluate("() => typeof restartBackoff !== 'undefined' ? restartBackoff : -1")
-                            msg = f"🎤 STT health: active={is_active}, running={is_running}, backoff={backoff}ms"
+                            health = await page.evaluate("() => window.__stt_health()")
+                            if health:
+                                msg = (f"🎤 STT health: running={health.get('isRunning')}, "
+                                       f"backoff={health.get('restartBackoff')}ms, "
+                                       f"active={health.get('interviewActive')}, "
+                                       f"bot_speaking={health.get('isBotSpeaking')}")
+                            else:
+                                msg = f"🎤 STT health: no data (page may be closed)"
                             print(msg); await push_log(msg)
                         except Exception as stt_err:
                             msg = f"⚠️  STT health check failed: {stt_err}"

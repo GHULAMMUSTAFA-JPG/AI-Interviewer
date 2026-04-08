@@ -123,6 +123,7 @@ class TTSService:
         logger.info(
             f"Processing transcript: interview={doc.interview_id} chars={len(doc.text)}"
         )
+        logger.info(f"[TTS TEXT] \"{doc.text[:300]}\"")
 
         await self._set_tts_status(doc.interview_id, "speaking")
         # Arm: mark bot as speaking, clear stale interrupt, start watching.

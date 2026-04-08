@@ -17,6 +17,11 @@ SPEECH_INJECTION_SCRIPT = """
     let interviewActive      = true;
     let restartBackoff       = 1500;   // ms — doubles on 'aborted', resets on success
 
+    // Expose state for Python health monitoring
+    window.__stt_health = function() {
+        return { isRunning, restartBackoff, interviewActive, isBotSpeaking };
+    };
+
     // ─── Two-phase interrupt state ───────────────────────────────
     // onspeechstart alone is not enough — background noise and room sounds
     // trigger it constantly. We wait for onresult to confirm real speech before

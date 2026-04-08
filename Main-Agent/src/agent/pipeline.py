@@ -110,6 +110,9 @@ async def process_candidate_message(
         if context.status in ("completed", "abandoned"):
             raise InterviewCompletedError(f"Interview {context.interview_id} already {context.status}")
 
+        # Log received candidate message
+        logger.info(f"[RECEIVED] Candidate: \"{context.latest_message[:200]}\"")
+
         # Truncate excessively long candidate messages
         context.latest_message, was_truncated = truncate_candidate_message(context.latest_message)
 
@@ -252,6 +255,7 @@ async def process_candidate_message(
 
         # ===== STAGE 5: SAVE & SEND =====
         logger.info(f"[STAGE 5] Saving response and updating state")
+        logger.info(f"[RESPONSE] Agent: \"{response_text[:200]}\"")
 
         # Save agent response to transcripts
         await db.transcripts.insert_one({
