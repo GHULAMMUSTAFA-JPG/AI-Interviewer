@@ -1,6 +1,11 @@
 """
 Console Handler — captures and processes Web Speech API events from browser console.
 Handles STT event parsing, echo cancellation, and interrupt triggering.
+
+FIX: Don't flush every TRANSCRIPT_EVENT immediately. The JavaScript silence timer
+(1500ms) handles batching. Flushing immediately in Python defeats the timer and
+causes fragmented saves. Instead, accumulate and flush on SPEECH_END or after a
+delayed timer (2s safety net).
 """
 import asyncio
 from logger import push_log
@@ -8,6 +13,14 @@ from speech_buffer import (
     get_speech_buffer, set_speech_buffer, clear_speech_buffer, get_speech_timer,
     set_speech_timer, update_last_speech_time, get_last_speech_time
 )
+
+
+async def _delayed_flush(interview_id: str, delay_sec: float) -> None:
+    """Wait delay_sec seconds, then flush the speech buffer if it has content."""
+    await asyncio.sleep(delay_sec)
+    if get_speech_buffer().strip():
+        from speech_buffer import _flush_speech_buffer
+        await _flush_speech_buffer(interview_id)
 
 
 
@@ -69,10 +82,18 @@ async def create_console_handler(page, interview_id: str, status_state: dict,
                     print(msg_log); await push_log(msg_log)
                 return
 
-            # Speech ended — JS will emit TRANSCRIPT_EVENT in ~1s.
+            # Speech ended — flush the accumulated buffer after a short delay
+            # to catch any final TRANSCRIPT_EVENT that may follow.
             if text.startswith('STT_SPEECH_END:'):
                 msg_log = "🔇 [SPEECH ENDED] Waiting for final transcript..."
                 print(msg_log); await push_log(msg_log)
+
+                # Flush after 500ms to catch any last TRANSCRIPT_EVENT from JS
+                timer = get_speech_timer()
+                if timer and not timer.done():
+                    timer.cancel()
+                new_timer = asyncio.create_task(_delayed_flush(interview_id, 0.5))
+                set_speech_timer(new_timer)
                 return
 
             # Final transcript from JS silence timer
@@ -83,17 +104,18 @@ async def create_console_handler(page, interview_id: str, status_state: dict,
                     buffer = get_speech_buffer()
                     buffer = (buffer + " " + final_text).strip() if buffer else final_text
                     set_speech_buffer(buffer)
+                    update_last_speech_time()
 
                     msg_log = f"🎤 [STT FINAL] \"{final_text[:80]}\""
                     print(msg_log); await push_log(msg_log)
 
-                    # Cancel any pending timer and flush immediately.
+                    # FIX: Don't flush immediately — let JS silence timer handle batching.
+                    # Start a delayed flush as safety net (2s) in case SPEECH_END never fires.
                     timer = get_speech_timer()
                     if timer and not timer.done():
                         timer.cancel()
-                    if flush_callback:
-                        new_timer = asyncio.create_task(flush_callback(interview_id))
-                        set_speech_timer(new_timer)
+                    new_timer = asyncio.create_task(_delayed_flush(interview_id, 2.0))
+                    set_speech_timer(new_timer)
                 return
 
             # Log STT errors only — STT_ACTIVE: fires every restart (~8s) and is just noise

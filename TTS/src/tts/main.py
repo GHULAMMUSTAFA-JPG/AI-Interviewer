@@ -36,6 +36,27 @@ class TTSService:
     async def start(self) -> None:
         """Start TTS service."""
         logger.info("Starting TTS Service (MongoDB interrupt mode)...")
+
+        # Validate ElevenLabs API keys before processing
+        logger.info("Validating ElevenLabs API keys...")
+        for i, key in enumerate(self._synthesizer._api_keys):
+            result = await self._synthesizer.validate_key(key, i)
+            if result and result.get("valid"):
+                logger.info(
+                    f"Key #{i+1}: VALID — tier={result['tier']}, "
+                    f"remaining={result['remaining']:,} chars"
+                )
+            elif result:
+                logger.error(f"Key #{i+1}: INVALID — {result.get('error')}: {result.get('detail', '')[:150]}")
+
+        # Check if any key is valid
+        valid_keys = [
+            i for i, k in enumerate(self._synthesizer._api_keys)
+            if (self._synthesizer._key_health.get(i, {}).get("blocked") is None)
+        ]
+        if not valid_keys:
+            logger.error("No valid ElevenLabs API keys found — TTS will not work!")
+
         self._running = True
 
         # Replay any agent transcripts missed while TTS was down
@@ -99,7 +120,9 @@ class TTSService:
         # 2. Stale buffer: any candidate T2 that escaped the pipeline stale check
         #    (saved within 275ms of this agent response) is in MongoDB by 600ms.
         #    The stale check below runs after this sleep to catch those.
-        await asyncio.sleep(0.6)
+        # Reduced from 0.6s to 0.3s — echo guard is sufficient and the stale check
+        # benefits from running earlier to catch more stale candidates.
+        await asyncio.sleep(0.3)
 
         # STALE CHECK (Position 2 gap):
         # If the candidate spoke again between the pipeline saving this response and

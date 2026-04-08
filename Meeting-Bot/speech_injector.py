@@ -7,22 +7,32 @@ SPEECH_INJECTION_SCRIPT = """
     window.__stt_injected = true;
 
     // ─── State ───────────────────────────────────────────────────
-    let transcript      = "";     // Accumulated confirmed finals (cleared each bot turn)
-    let isBotSpeaking   = false;  // Hard gate: true = discard everything
-    let botStoppedAt    = 0;      // Timestamp when bot stopped (for echo time gate)
-    let silenceTimer    = null;   // Fires SILENCE_MS after last final → save
-    let maxDurTimer     = null;   // Fires MAX_SPEECH_MS after speech starts → force-save
-    let recognition     = null;
-    let isRunning       = false;
-    let interviewActive = true;
-    let restartBackoff  = 1500;   // ms — doubles on 'aborted', resets on success
+    let transcript           = "";     // Accumulated confirmed finals (cleared each bot turn)
+    let isBotSpeaking        = false;  // Hard gate: true = discard everything
+    let botStoppedAt         = 0;      // Timestamp when bot stopped (for echo time gate)
+    let silenceTimer         = null;   // Fires SILENCE_MS after last final → save
+    let maxDurTimer          = null;   // Fires MAX_SPEECH_MS after speech starts → force-save
+    let recognition          = null;
+    let isRunning            = false;
+    let interviewActive      = true;
+    let restartBackoff       = 1500;   // ms — doubles on 'aborted', resets on success
+
+    // ─── Two-phase interrupt state ───────────────────────────────
+    // onspeechstart alone is not enough — background noise and room sounds
+    // trigger it constantly. We wait for onresult to confirm real speech before
+    // sending the interrupt signal to Python.
+    let pendingInterruptTimer = null;  // window waiting for onresult confirmation
+    let interruptConfirmed    = false; // interrupt already sent this bot turn
 
     // ─── Constants ───────────────────────────────────────────────
-    const SILENCE_MS     = 500;   // ms of silence after last confirmed word → save
-    const ECHO_GATE_MS   = 1500;  // ms to ignore STT after bot stops (covers Google STT queue)
-    const MAX_SPEECH_MS  = 25000; // ms — force-save when onspeechend never fires (bg noise)
-    const MIN_CONFIDENCE = 0.55;  // discard finals below this; 0 = not reported → keep
-    const MIN_WORDS      = 2;     // discard saves shorter than this (noise artifacts)
+    const SILENCE_MS           = 1500;  // ms of silence after last confirmed word → save (allow natural pauses)
+    const ECHO_GATE_MS         = 1500;  // ms to ignore STT after bot stops (covers Google STT queue)
+    const MAX_SPEECH_MS        = 25000; // ms — force-save when onspeechend never fires (bg noise)
+    const MIN_CONFIDENCE       = 0.55;  // discard finals below this; 0 = not reported → keep
+    const MIN_WORDS            = 2;     // discard saves shorter than this (noise artifacts)
+    const INTERRUPT_CONFIRM_MS = 1000;  // ms window to confirm interrupt via onresult
+    const MIN_INTERRUPT_WORDS  = 1;     // words required in onresult to confirm real interruption
+    const MAX_RESTART_BACKOFF  = 4000;  // ms — max backoff cap for recognition restarts (was 16000)
 
     // ─── Python bridge ───────────────────────────────────────────
     function emit(tag, data) {
@@ -34,10 +44,18 @@ SPEECH_INJECTION_SCRIPT = """
         if (maxDurTimer)  { clearTimeout(maxDurTimer);  maxDurTimer  = null; }
     }
 
+    function _clearInterruptState() {
+        interruptConfirmed = false;
+        if (pendingInterruptTimer) {
+            clearTimeout(pendingInterruptTimer);
+            pendingInterruptTimer = null;
+        }
+    }
+
     function _trySave() {
         // Shared save path used by silence timer and MAX_SPEECH force-save.
         const text  = transcript.trim();
-        const words = text ? text.split(/\s+/).length : 0;
+        const words = text ? text.split(/\\s+/).length : 0;
         if (text && words >= MIN_WORDS && !isBotSpeaking) {
             emit("TRANSCRIPT_EVENT:", text);
             transcript = "";
@@ -50,6 +68,7 @@ SPEECH_INJECTION_SCRIPT = """
     // ─── Bot gates (Python calls these via page.evaluate) ────────
     window.__tts_started = function() {
         isBotSpeaking = true;
+        _clearInterruptState();
         _clearTimers();
         transcript = "";
         emit("TTS_STARTED:");
@@ -57,6 +76,7 @@ SPEECH_INJECTION_SCRIPT = """
 
     window.__tts_ended = function(wasInterrupted) {
         isBotSpeaking = false;
+        _clearInterruptState();
         // Interrupt: candidate's speech stopped the bot — skip echo gate so those
         //            interrupting words are captured immediately.
         // Natural end: Google STT queue still has 1-2s of bot audio in flight —
@@ -70,11 +90,17 @@ SPEECH_INJECTION_SCRIPT = """
             _clearTimers();
             transcript = "";
         }
+
+        // FIX: Reset backoff so TTS restarts don't compound delays.
+        // Without this, repeated stop/start cycles grow restartBackoff to 16s,
+        // creating 16-second gaps where NO speech is captured.
+        restartBackoff = 1500;
+
         emit("TTS_ENDED:");
         // Force a fresh recognition session to clear any throttled/aborted state
         // that accumulated while recognition was running during isBotSpeaking=true.
         if (recognition && isRunning) {
-            recognition.stop();   // onend fires → scheduleRestart(restartBackoff)
+            recognition.stop();   // onend fires → scheduleRestart(restartBackoff=1500)
         } else if (!isRunning && interviewActive) {
             scheduleRestart(300);
         }
@@ -83,6 +109,7 @@ SPEECH_INJECTION_SCRIPT = """
     window.__stop_interview = function() {
         interviewActive = false;
         _clearTimers();
+        _clearInterruptState();
         if (recognition) recognition.stop();
         emit("STT_STOPPED:");
     };
@@ -92,7 +119,7 @@ SPEECH_INJECTION_SCRIPT = """
         const r = new webkitSpeechRecognition();
         r.continuous      = true;
         r.interimResults  = true;
-        r.lang            = 'en-US';
+        r.lang            = '__STT_LANGUAGE__';
         r.maxAlternatives = 1;
 
         r.onstart = function() {
@@ -101,35 +128,61 @@ SPEECH_INJECTION_SCRIPT = """
             emit("STT_ACTIVE:");
         };
 
-        // ── Sub-feature: Interruption detection ──────────────────
-        // Fires when the recognition engine detects the start of speech.
-        // If bot is currently speaking, this is a candidate interruption — emit
-        // STT_SPEECH_START: so Python can set tts_interrupt=True and kill TTS.
-        // If bot already finished, check echo gate before marking speech active.
+        // ── Sub-feature: Interruption detection (two-phase) ──────
+        // onspeechstart fires on ANY audio above the engine's threshold — room noise,
+        // keyboard clicks, microphone pops. We don't interrupt the bot on onspeechstart
+        // alone. Instead we open a 1000ms window and wait for onresult. If onresult
+        // delivers ≥1 word, the interrupt is confirmed. If the window expires with no
+        // onresult, it was noise — bot continues speaking.
         r.onspeechstart = function() {
             if (Date.now() - botStoppedAt < ECHO_GATE_MS && !isBotSpeaking) return;
+
+            if (isBotSpeaking) {
+                // Start confirmation window if not already waiting
+                if (!pendingInterruptTimer && !interruptConfirmed) {
+                    pendingInterruptTimer = setTimeout(function() {
+                        pendingInterruptTimer = null;
+                        // Window expired with no onresult — noise, not speech. Ignore.
+                    }, INTERRUPT_CONFIRM_MS);
+                }
+                return;  // Don't emit yet — wait for confirmation
+            }
+
             emit("STT_SPEECH_START:");
 
             // ── Sub-feature: MAX_SPEECH_MS force-save ─────────────
-            // Start (or restart) the max-duration guard whenever speech begins.
-            // Prevents the recognition session from staying open for minutes due
-            // to background noise, which would delay the next LLM turn.
             if (maxDurTimer) clearTimeout(maxDurTimer);
-            if (!isBotSpeaking) {
-                maxDurTimer = setTimeout(function() {
-                    maxDurTimer = null;
-                    if (isBotSpeaking) return;
-                    if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
-                    emit("STT_MAX_DURATION_SAVE:");
-                    _trySave();
-                }, MAX_SPEECH_MS);
-            }
+            maxDurTimer = setTimeout(function() {
+                maxDurTimer = null;
+                if (isBotSpeaking) return;
+                if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
+                emit("STT_MAX_DURATION_SAVE:");
+                _trySave();
+            }, MAX_SPEECH_MS);
         };
 
         // ── Sub-feature: Echo gate + silence timer + noise filters ─
         r.onresult = function(event) {
-            // Hard gate: bot is speaking — discard everything
-            if (isBotSpeaking) return;
+            // Two-phase interrupt: bot is speaking but we have a pending confirmation.
+            // Check if this result contains real speech words.
+            if (isBotSpeaking) {
+                if (pendingInterruptTimer && !interruptConfirmed) {
+                    for (let i = event.resultIndex; i < event.results.length; i++) {
+                        const text = event.results[i][0].transcript.trim();
+                        if (text && text.split(/\\s+/).length >= MIN_INTERRUPT_WORDS) {
+                            // Real speech confirmed — interrupt the bot
+                            clearTimeout(pendingInterruptTimer);
+                            pendingInterruptTimer = null;
+                            interruptConfirmed    = true;
+                            transcript            = text + " ";  // preserve candidate's words
+                            emit("STT_SPEECH_START:");  // Python: set tts_interrupt=True
+                            break;
+                        }
+                    }
+                }
+                return;  // Hard gate: discard all further processing while bot speaks
+            }
+
             // Time gate: too soon after bot stopped — Google STT queue still has bot audio
             if (Date.now() - botStoppedAt < ECHO_GATE_MS) return;
 
@@ -140,8 +193,6 @@ SPEECH_INJECTION_SCRIPT = """
 
                 if (result.isFinal) {
                     // ── Sub-feature: MIN_CONFIDENCE filter ─────────
-                    // Discard finals the recognition engine is unsure about.
-                    // confidence=0 means "not reported by this browser" → keep.
                     const conf = result[0].confidence;
                     if (conf > 0 && conf < MIN_CONFIDENCE) {
                         emit("STT_LOW_CONF:", {text: text, confidence: conf});
@@ -156,8 +207,6 @@ SPEECH_INJECTION_SCRIPT = """
 
             if (gotFinal) {
                 // ── Sub-feature: Silence timer ──────────────────────
-                // Reset the window after each new confirmed word.
-                // Fires SILENCE_MS after the LAST word — not the first.
                 if (silenceTimer) clearTimeout(silenceTimer);
                 silenceTimer = setTimeout(function() {
                     silenceTimer = null;
@@ -167,13 +216,9 @@ SPEECH_INJECTION_SCRIPT = """
         };
 
         r.onspeechend = function() {
-            // Speech paused — the silence timer set in onresult handles saving.
-            // Cancel the max-duration guard since speech ended naturally.
             if (maxDurTimer) { clearTimeout(maxDurTimer); maxDurTimer = null; }
             if (isBotSpeaking) return;
             emit("STT_SPEECH_END:");
-            // If no silence timer is running (onspeechend fired with no onresult finals
-            // — pure noise detection), check if we have accumulated transcript to save.
             if (!silenceTimer && transcript.trim()) {
                 silenceTimer = setTimeout(function() {
                     silenceTimer = null;
@@ -186,18 +231,14 @@ SPEECH_INJECTION_SCRIPT = """
         r.onerror = function(event) {
             isRunning = false;
             if (event.error === 'no-speech') {
-                // Normal — nothing detected in the audio stream.
-                // 1500ms prevents Chrome from throttling after rapid restart cycles.
                 scheduleRestart(1500);
             } else if (event.error === 'aborted') {
-                // Chrome throttled the speech service — back off exponentially.
                 emit("STT_ERROR:", "aborted (retry in " + restartBackoff + "ms)");
                 const delay   = restartBackoff;
-                restartBackoff = Math.min(restartBackoff * 2, 16000);
+                restartBackoff = Math.min(restartBackoff * 2, MAX_RESTART_BACKOFF);
                 scheduleRestart(delay);
             } else if (event.error === 'not-allowed') {
                 emit("STT_ERROR:", "not-allowed — microphone permission denied");
-                // Don't restart — requires manual fix
             } else if (event.error === 'network') {
                 emit("STT_ERROR:", "network — Google STT unreachable");
                 scheduleRestart(3000);
@@ -210,8 +251,6 @@ SPEECH_INJECTION_SCRIPT = """
         r.onend = function() {
             isRunning = false;
             if (interviewActive && !isBotSpeaking) {
-                // Use same backoff as no-speech to prevent Chrome throttling.
-                // 300ms was too aggressive — Chrome rejects rapid restarts with 'aborted'.
                 scheduleRestart(restartBackoff);
             }
         };
@@ -228,7 +267,7 @@ SPEECH_INJECTION_SCRIPT = """
                     recognition.start();
                 } catch(e) {
                     emit("STT_ERROR:", "start() threw: " + e.message);
-                    restartBackoff = Math.min(restartBackoff * 2, 16000);
+                    restartBackoff = Math.min(restartBackoff * 2, MAX_RESTART_BACKOFF);
                     scheduleRestart(restartBackoff);
                 }
             }
@@ -243,5 +282,6 @@ SPEECH_INJECTION_SCRIPT = """
 """
 
 
-async def inject_speech_recognition(page, session_id: str) -> None:
-    await page.evaluate(SPEECH_INJECTION_SCRIPT)
+async def inject_speech_recognition(page, session_id: str, language: str = "en-US") -> None:
+    script = SPEECH_INJECTION_SCRIPT.replace("'__STT_LANGUAGE__'", f"'{language}'")
+    await page.evaluate(script)

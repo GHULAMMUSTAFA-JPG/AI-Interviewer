@@ -28,6 +28,14 @@ async def _flush_speech_buffer(interview_id: str) -> None:
     if _speech_buffer.strip():
         current_text = _speech_buffer.strip()
 
+        # FIX: Filter noise artifacts — require at least 2 words
+        words = current_text.split()
+        if len(words) < 2:
+            msg = f"⚠️  [NOISE FILTERED] Too short ({len(words)} word): \"{current_text}\""
+            print(msg); await push_log(msg)
+            _speech_buffer = ""
+            return
+
         # Dedup: don't save identical text twice in a row
         if current_text == _last_saved_text:
             msg = "⚠️  [DUPLICATE PREVENTED] Same text as last save — discarding"

@@ -94,7 +94,7 @@ async def join_meeting_and_transcribe(
     session_id = interview_id or datetime.now().strftime("%Y%m%d_%H%M%S")
     name = email.split("@")[0]
 
-    msg = f"🤖 Bot: {name}  [WEB SPEECH API BATCH MODE]  session={session_id}"
+    msg = f"🤖 Bot: {name}  [WEB SPEECH API]  lang={STT_LANGUAGE}  session={session_id}"
     print(msg); await push_log(msg)
 
     # Pre-grant microphone permission
@@ -386,7 +386,7 @@ async def join_meeting_and_transcribe(
             # Inject Web Speech API
             msg = "🎤 Injecting Web Speech API..."
             print(msg); await push_log(msg)
-            await inject_speech_recognition(page, session_id)
+            await inject_speech_recognition(page, session_id, STT_LANGUAGE)
             msg = "✅ Web Speech API active"
             print(msg); await push_log(msg)
 
@@ -423,6 +423,49 @@ async def join_meeting_and_transcribe(
                     print(msg); await push_log(msg)
 
             heartbeat_task = asyncio.create_task(_send_heartbeat())
+
+            # FIX: Periodic audio routing maintenance — Chrome creates new sink-inputs
+            # dynamically when new audio streams start. Without periodic re-routing,
+            # these new inputs bypass VirtualSink and BotMic, so STT doesn't hear them.
+            async def _maintain_audio_routing():
+                """Re-route Chrome sink-inputs to VirtualSink every 5 seconds."""
+                try:
+                    while True:
+                        await asyncio.sleep(5)
+                        n = await _route_all_sink_inputs_to_virtualsink()
+                        if n > 0:
+                            msg = f"🔊 Audio routing: re-routed {n} sink-input(s) to VirtualSink"
+                            print(msg); await push_log(msg)
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    msg = f"⚠️  Audio routing maintenance error: {e}"
+                    print(msg); await push_log(msg)
+
+            audio_routing_task = asyncio.create_task(_maintain_audio_routing())
+
+            # STT health monitoring — verify recognition is actually active
+            async def _monitor_stt_health():
+                """Check every 10s that Web Speech API is still functioning."""
+                try:
+                    while True:
+                        await asyncio.sleep(10)
+                        try:
+                            is_active = await page.evaluate("() => typeof window.__speechActive !== 'undefined' && window.__speechActive")
+                            is_running = await page.evaluate("() => typeof isRunning !== 'undefined' && isRunning")
+                            backoff = await page.evaluate("() => typeof restartBackoff !== 'undefined' ? restartBackoff : -1")
+                            msg = f"🎤 STT health: active={is_active}, running={is_running}, backoff={backoff}ms"
+                            print(msg); await push_log(msg)
+                        except Exception as stt_err:
+                            msg = f"⚠️  STT health check failed: {stt_err}"
+                            print(msg)
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    msg = f"⚠️  STT monitor error: {e}"
+                    print(msg); await push_log(msg)
+
+            stt_health_task = asyncio.create_task(_monitor_stt_health())
 
             # Watch bot_speaking flag for echo cancellation
             async def _watch_bot_speaking():
