@@ -60,12 +60,11 @@ TTS/models/piper/*.onnx.json
 *.txt
 !**/requirements.txt
 
-# ── Markdown (keep only core project docs) ────────────────────────
+# ── Markdown (ignore ALL) ────────────────────────────────────────
 *.md
-!CLAUDE.md
-!**/CLAUDE.md
-!README.md
-!**/README.md
+
+# ── Docs folder ──────────────────────────────────────────────────
+docs/
 
 # ── Session continuation files ────────────────────────────────────
 2026-*-this-session-*.txt
