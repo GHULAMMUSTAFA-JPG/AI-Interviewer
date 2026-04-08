@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Evaluations — AI Interviewer</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 980px; margin: 40px auto; padding: 0 20px; background: #f5f5f5; }
+  h1 { color: #1e3a5f; margin-bottom: 4px; }
+  .subtitle { color: #666; font-size: 0.9em; margin-bottom: 24px; }
+  a { color: #1e3a5f; }
+  .nav { margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; }
+
+  table { width: 100%; border-collapse: collapse; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.1); border-radius: 8px; overflow: hidden; }
+  th { background: #1e3a5f; color: #fff; padding: 12px 16px; text-align: left; font-weight: 600; font-size: 0.88em; }
+  td { padding: 12px 16px; border-bottom: 1px solid #eee; vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #f0f4f8; }
+
+  /* Recommendation badges */
+  .rec { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.82em; font-weight: 700; letter-spacing: 0.04em; }
+  .HIRE    { background: #d1fae5; color: #065f46; }
+  .MAYBE   { background: #fef3c7; color: #92400e; }
+  .NO_HIRE { background: #fee2e2; color: #991b1b; }
+
+  /* Score bar */
+  .score-wrap { display: flex; align-items: center; gap: 8px; }
+  .score-bar-bg { width: 80px; height: 8px; background: #e5e7eb; border-radius: 4px; overflow: hidden; }
+  .score-bar-fill { height: 100%; background: #10b981; border-radius: 4px; }
+  .score-num { font-size: 0.9em; font-weight: 600; color: #374151; white-space: nowrap; }
+
+  .view-link {
+    display: inline-block; padding: 4px 12px; background: #1e3a5f; color: #fff;
+    border-radius: 6px; text-decoration: none; font-size: 0.82em;
+  }
+  .view-link:hover { background: #4f46e5; color: #fff; }
+
+  .empty { text-align: center; color: #888; padding: 60px 0; }
+  .cv-preview { font-size: 0.8em; color: #888; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <div>
+    <a href="/conversations">← All interviews</a>
+    &nbsp;|&nbsp;
+    <a href="/">New interview</a>
+  </div>
+</div>
+
+<h1>Evaluations</h1>
+<p class="subtitle">{{ evaluations | length }} completed interview{{ 's' if evaluations | length != 1 else '' }}</p>
+
+{% if not evaluations %}
+<div class="empty">No evaluations yet. Complete an interview to see results here.</div>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Date</th>
+      <th>Interview</th>
+      <th>Recommendation</th>
+      <th>Score</th>
+      <th>Duration</th>
+      <th>Turns</th>
+      <th>Phase</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for ev in evaluations %}
+    {% set rec = ev.evaluation.recommendation if ev.evaluation else '' %}
+    {% set score = ev.evaluation.score if ev.evaluation else 0 %}
+    <tr>
+      <td style="white-space:nowrap; font-size:0.88em">
+        {{ ev.started_at.strftime('%b %d, %H:%M') if ev.started_at else '—' }}
+      </td>
+      <td style="font-family:monospace; font-size:0.82em; color:#555">
+        {{ ev.interview_id[:16] }}...
+      </td>
+      <td>
+        {% if rec %}
+        <span class="rec {{ rec }}">{{ rec }}</span>
+        {% else %}
+        <span style="color:#aaa">—</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if score %}
+        <div class="score-wrap">
+          <div class="score-bar-bg">
+            <div class="score-bar-fill" style="width: {{ score * 10 }}%"></div>
+          </div>
+          <span class="score-num">{{ score }}/10</span>
+        </div>
+        {% else %}
+        <span style="color:#aaa">—</span>
+        {% endif %}
+      </td>
+      <td style="font-size:0.88em; color:#555">
+        {% if ev.duration_min %}{{ ev.duration_min }} min{% else %}—{% endif %}
+      </td>
+      <td style="font-size:0.88em; color:#555">{{ ev.turn_count or 0 }}</td>
+      <td style="font-size:0.88em; color:#555">{{ ev.phase or '—' }}</td>
+      <td>
+        <a class="view-link" href="/evaluation/{{ ev.interview_id }}">View →</a>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+</body>
+</html>

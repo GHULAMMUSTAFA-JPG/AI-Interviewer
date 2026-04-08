@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Evaluation — {{ interview.interview_id[:8] }}</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 860px; margin: 40px auto; padding: 0 20px; background: #f5f5f5; }
+  a { color: #1e3a5f; }
+  .nav { margin-bottom: 16px; font-size: 0.9em; }
+
+  /* ── Metadata bar ── */
+  .meta { color: #666; font-size: 0.85em; margin-bottom: 24px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .meta strong { color: #333; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.82em; }
+  .completed { background: #cce5ff; color: #004085; }
+  .abandoned  { background: #f8d7da; color: #721c24; }
+  .in_progress{ background: #d4edda; color: #155724; }
+
+  /* ── Evaluation card ── */
+  .eval-card {
+    background: #fff;
+    border-radius: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.1);
+    padding: 24px 28px;
+    margin-bottom: 28px;
+  }
+  .eval-header { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
+  .rec-badge {
+    display: inline-block; padding: 6px 16px; border-radius: 14px;
+    font-size: 1.1em; font-weight: 800; letter-spacing: 0.06em;
+  }
+  .HIRE    { background: #d1fae5; color: #065f46; }
+  .MAYBE   { background: #fef3c7; color: #92400e; }
+  .NO_HIRE { background: #fee2e2; color: #991b1b; }
+
+  .score-wrap { display: flex; align-items: center; gap: 10px; }
+  .score-bar-bg { width: 120px; height: 10px; background: #e5e7eb; border-radius: 5px; overflow: hidden; }
+  .score-bar-fill { height: 100%; background: #10b981; border-radius: 5px; }
+  .score-num { font-size: 1.2em; font-weight: 700; color: #374151; }
+
+  .eval-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+  @media (max-width: 580px) { .eval-grid { grid-template-columns: 1fr; } }
+
+  .eval-section h3 { font-size: 0.88em; text-transform: uppercase; letter-spacing: 0.06em; color: #6b7280; margin: 0 0 8px; }
+  .eval-section ul { margin: 0; padding-left: 18px; }
+  .eval-section ul li { font-size: 0.92em; color: #374151; margin-bottom: 5px; line-height: 1.45; }
+
+  .strengths h3 { color: #065f46; }
+  .concerns  h3 { color: #991b1b; }
+
+  .reasoning-section { border-top: 1px solid #f0f0f0; padding-top: 16px; }
+  .reasoning-section h3 { font-size: 0.88em; text-transform: uppercase; letter-spacing: 0.06em; color: #6b7280; margin: 0 0 8px; }
+  .reasoning-section p { font-size: 0.92em; color: #374151; line-height: 1.6; margin: 0; font-style: italic; }
+
+  /* ── Conversation section ── */
+  h2 { color: #1e3a5f; font-size: 1.05em; margin: 28px 0 12px; border-bottom: 2px solid #e5e7eb; padding-bottom: 6px; }
+
+  .chat { display: flex; flex-direction: column; gap: 10px; }
+  .msg { display: flex; gap: 12px; align-items: flex-start; }
+  .msg.agent     { flex-direction: row; }
+  .msg.candidate { flex-direction: row-reverse; }
+
+  .bubble {
+    max-width: 72%; padding: 10px 14px;
+    border-radius: 14px; line-height: 1.5; font-size: 0.95em;
+  }
+  .agent .bubble {
+    background: #1e3a5f; color: #fff; border-top-left-radius: 3px;
+  }
+  .candidate .bubble {
+    background: #fff; color: #222; border: 1px solid #ddd; border-top-right-radius: 3px;
+  }
+  .speaker {
+    font-size: 0.75em; color: #888; min-width: 60px; margin-top: 4px; text-align: center;
+  }
+  .msg.agent .speaker { text-align: left; }
+  .msg.candidate .speaker { text-align: right; }
+  .ts { font-size: 0.72em; color: #aaa; margin-top: 3px; }
+  .empty-chat { color: #888; text-align: center; margin: 40px 0; }
+
+  .audio-container { margin-top: 6px; display: flex; align-items: center; gap: 6px; }
+  .audio-btn {
+    background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.3);
+    color: #fff; padding: 4px 8px; border-radius: 6px; cursor: pointer;
+    font-size: 0.75em; display: inline-flex; align-items: center; gap: 4px;
+  }
+  .audio-btn:hover { background: rgba(255,255,255,0.3); }
+  .audio-btn.playing { background: rgba(40,167,69,0.3); border-color: rgba(40,167,69,0.5); }
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <a href="/evaluations">← All evaluations</a>
+  &nbsp;|&nbsp;
+  <a href="/conversation/{{ interview.interview_id }}">Live transcript view</a>
+  &nbsp;|&nbsp;
+  <a href="/">New interview</a>
+</div>
+
+<!-- ── Metadata bar ── -->
+<div class="meta">
+  <span>Interview <strong style="font-family:monospace">{{ interview.interview_id[:16] }}...</strong></span>
+  <span><span class="badge {{ interview.status or 'completed' }}">{{ interview.status or 'completed' }}</span></span>
+  <span>Phase: <strong>{{ interview.phase or '—' }}</strong></span>
+  <span>Turns: <strong>{{ interview.turn_count or 0 }}</strong></span>
+  {% if duration_min %}<span>Duration: <strong>{{ duration_min }} min</strong></span>{% endif %}
+  <span>{{ interview.started_at.strftime('%b %d %Y, %H:%M') if interview.started_at else '' }}</span>
+</div>
+
+<!-- ── Evaluation card ── -->
+{% if evaluation %}
+<div class="eval-card">
+  <div class="eval-header">
+    <span class="rec-badge {{ evaluation.recommendation }}">{{ evaluation.recommendation }}</span>
+    <div class="score-wrap">
+      <div class="score-bar-bg">
+        <div class="score-bar-fill" style="width: {{ (evaluation.score or 0) * 10 }}%"></div>
+      </div>
+      <span class="score-num">{{ evaluation.score or 0 }}<span style="font-size:0.65em;color:#6b7280"> / 10</span></span>
+    </div>
+  </div>
+
+  <div class="eval-grid">
+    <div class="eval-section strengths">
+      <h3>Strengths</h3>
+      <ul>
+        {% for s in (evaluation.strengths or []) %}
+        <li>{{ s }}</li>
+        {% else %}
+        <li style="color:#aaa">None listed</li>
+        {% endfor %}
+      </ul>
+    </div>
+    <div class="eval-section concerns">
+      <h3>Concerns</h3>
+      <ul>
+        {% for c in (evaluation.concerns or []) %}
+        <li>{{ c }}</li>
+        {% else %}
+        <li style="color:#aaa">None listed</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+
+  {% if evaluation.reasoning %}
+  <div class="reasoning-section">
+    <h3>Reasoning</h3>
+    <p>{{ evaluation.reasoning }}</p>
+  </div>
+  {% endif %}
+</div>
+{% else %}
+<div style="background:#fff;border-radius:10px;padding:24px;margin-bottom:28px;color:#888;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,.08)">
+  No evaluation generated for this interview yet.
+</div>
+{% endif %}
+
+<!-- ── Full conversation ── -->
+<h2>Full Conversation ({{ messages | length }} messages)</h2>
+
+<div class="chat">
+  {% if not messages %}
+  <div class="empty-chat">No messages recorded.</div>
+  {% endif %}
+  {% for m in messages %}
+  <div class="msg {{ m.speaker }}">
+    <div>
+      <div class="bubble">{{ m.text }}</div>
+      {% if m.speaker == 'agent' and m.has_audio %}
+      <div class="audio-container">
+        <button class="audio-btn" onclick="playAudio('{{ m.audio_url }}', this)">
+          ▶ Play
+        </button>
+      </div>
+      {% endif %}
+      <div class="ts">{{ m.timestamp.strftime('%H:%M:%S') if m.timestamp else '' }}</div>
+    </div>
+    <div class="speaker">{{ m.speaker | upper }}</div>
+  </div>
+  {% endfor %}
+</div>
+
+<script>
+let currentAudio = null;
+let currentBtn = null;
+
+async function playAudio(fileId, btn) {
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio = null;
+  }
+  if (currentBtn) {
+    currentBtn.classList.remove('playing');
+    currentBtn.innerHTML = '▶ Play';
+  }
+
+  const audio = new Audio(`/api/audio/${fileId}`);
+  currentAudio = audio;
+  currentBtn = btn;
+
+  btn.classList.add('playing');
+  btn.innerHTML = '⏸ Playing...';
+
+  audio.onended = () => {
+    btn.classList.remove('playing');
+    btn.innerHTML = '▶ Play';
+    currentAudio = null;
+    currentBtn = null;
+  };
+  audio.onerror = () => {
+    btn.classList.remove('playing');
+    btn.innerHTML = '▶ Play';
+    currentAudio = null;
+    currentBtn = null;
+  };
+
+  await audio.play();
+}
+</script>
+
+</body>
+</html>

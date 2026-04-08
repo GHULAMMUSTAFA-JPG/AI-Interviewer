@@ -51,6 +51,10 @@ class Config:
     elevenlabs_base_url: str = "https://api.elevenlabs.io"
     elevenlabs_connect_timeout: float = 10.0  # seconds
 
+    # Edge TTS (Microsoft) — free, no API key
+    tts_provider: str = os.getenv("TTS_PROVIDER", "edge").lower()
+    edge_tts_voice: str = os.getenv("EDGE_TTS_VOICE", "en-US-GuyNeural")
+
     # Audio
     sample_rate: int = 22050
     channels: int = 1

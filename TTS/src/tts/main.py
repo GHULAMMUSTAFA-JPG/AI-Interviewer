@@ -11,6 +11,7 @@ from .config import config
 from .logging_config import setup_logging
 from .tts_queue import TranscriptListener
 from .synthesizer import ElevenLabsSynthesizer
+from .edge_synthesizer import EdgeTTSSynthesizer
 from .audio_player import AudioPlayer
 from .interrupt_handler import InterruptHandler
 from .status_updater import TranscriptUpdater
@@ -25,7 +26,18 @@ class TTSService:
     def __init__(self) -> None:
         self._mongo_client = AsyncIOMotorClient(config.mongodb_uri)
         self._transcript_listener = TranscriptListener(self._mongo_client)
-        self._synthesizer = ElevenLabsSynthesizer()
+
+        # Select TTS provider based on config
+        if config.tts_provider == "elevenlabs":
+            self._synthesizer = ElevenLabsSynthesizer()
+            logger.info("Using ElevenLabs synthesizer")
+        elif config.tts_provider == "edge":
+            self._synthesizer = EdgeTTSSynthesizer()
+            logger.info(f"Using Edge TTS synthesizer (voice={config.edge_tts_voice})")
+        else:
+            logger.error(f"Unknown TTS provider: {config.tts_provider}")
+            self._synthesizer = EdgeTTSSynthesizer()  # fallback
+
         self._player = AudioPlayer()
         self._interrupt_handler = InterruptHandler(self._mongo_client)
         self._transcript_updater = TranscriptUpdater(self._mongo_client)
@@ -37,25 +49,29 @@ class TTSService:
         """Start TTS service."""
         logger.info("Starting TTS Service (MongoDB interrupt mode)...")
 
-        # Validate ElevenLabs API keys before processing
-        logger.info("Validating ElevenLabs API keys...")
-        for i, key in enumerate(self._synthesizer._api_keys):
-            result = await self._synthesizer.validate_key(key, i)
-            if result and result.get("valid"):
-                logger.info(
-                    f"Key #{i+1}: VALID — tier={result['tier']}, "
-                    f"remaining={result['remaining']:,} chars"
-                )
-            elif result:
-                logger.error(f"Key #{i+1}: INVALID — {result.get('error')}: {result.get('detail', '')[:150]}")
+        # Validate ElevenLabs API keys if using that provider
+        if config.tts_provider == "elevenlabs" and hasattr(self._synthesizer, 'validate_key'):
+            logger.info("Validating ElevenLabs API keys (testing actual TTS endpoint)...")
+            for i, key in enumerate(self._synthesizer._api_keys):
+                result = await self._synthesizer.validate_key(key, i)
+                if result and result.get("valid"):
+                    logger.info(
+                        f"Key #{i+1}: VALID — generated {result.get('bytes_generated', 0):,} bytes "
+                        f"(model={result.get('model')}, voice={result.get('voice')})"
+                    )
+                elif result:
+                    logger.error(f"Key #{i+1}: INVALID — {result.get('error')}: {result.get('detail', '')[:150]}")
+        elif config.tts_provider == "edge":
+            logger.info(f"Edge TTS active (free, no API key) — voice={config.edge_tts_voice}")
 
-        # Check if any key is valid
-        valid_keys = [
-            i for i, k in enumerate(self._synthesizer._api_keys)
-            if (self._synthesizer._key_health.get(i, {}).get("blocked") is None)
-        ]
-        if not valid_keys:
-            logger.error("No valid ElevenLabs API keys found — TTS will not work!")
+        # Check if any ElevenLabs key is valid
+        if config.tts_provider == "elevenlabs":
+            valid_keys = [
+                i for i, k in enumerate(self._synthesizer._api_keys)
+                if (self._synthesizer._key_health.get(i, {}).get("blocked") is None)
+            ]
+            if not valid_keys:
+                logger.error("No valid ElevenLabs API keys found — TTS will not work!")
 
         self._running = True
 

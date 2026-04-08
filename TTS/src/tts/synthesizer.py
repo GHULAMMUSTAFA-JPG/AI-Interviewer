@@ -57,34 +57,67 @@ class ElevenLabsSynthesizer:
 
     async def validate_key(self, api_key: str, key_index: int) -> dict | None:
         """
-        Validate an ElevenLabs API key by fetching user subscription info.
-        Returns dict with subscription details or None if invalid.
+        Validate an ElevenLabs API key by testing the actual TTS endpoint.
+        We use a minimal text synthesis request rather than /v1/user because
+        most API keys lack the 'user_read' permission required by /v1/user.
+        Returns dict with validation result.
         """
+        model_id = config.elevenlabs_model_id
+        voice_id = config.elevenlabs_voice_id
+        output_format = config.elevenlabs_output_format
+
+        url = (
+            f"{config.elevenlabs_base_url}"
+            f"/v1/text-to-speech/{voice_id}/stream"
+            f"?output_format={output_format}"
+        )
+        headers = {"xi-api-key": api_key, "Content-Type": "application/json"}
+        body = {"text": "Test.", "model_id": model_id}
+
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(
-                    "https://api.elevenlabs.io/v1/user",
-                    headers={"xi-api-key": api_key}
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    sub = data.get("subscription", {})
-                    return {
-                        "valid": True,
-                        "tier": sub.get("tier", "unknown"),
-                        "character_count": sub.get("character_count", 0),
-                        "character_limit": sub.get("character_limit", 0),
-                        "remaining": sub.get("character_limit", 0) - sub.get("character_count", 0),
-                    }
-                elif resp.status_code == 401:
-                    logger.error(f"Key #{key_index + 1} INVALID (401): {resp.text[:200]}")
-                    return {"valid": False, "error": "invalid_key", "detail": resp.text[:200]}
-                elif resp.status_code == 402:
-                    logger.error(f"Key #{key_index + 1} NO QUOTA (402): {resp.text[:200]}")
-                    return {"valid": False, "error": "no_quota", "detail": resp.text[:200]}
-                else:
-                    logger.error(f"Key #{key_index + 1} HTTP {resp.status_code}: {resp.text[:200]}")
-                    return {"valid": False, "error": f"http_{resp.status_code}", "detail": resp.text[:200]}
+                async with client.stream("POST", url, headers=headers, json=body) as resp:
+                    if resp.status_code == 200:
+                        total_bytes = 0
+                        async for chunk in resp.aiter_bytes():
+                            total_bytes += len(chunk)
+                        return {
+                            "valid": True,
+                            "bytes_generated": total_bytes,
+                            "model": model_id,
+                            "voice": voice_id,
+                        }
+                    elif resp.status_code == 401:
+                        detail = ""
+                        try:
+                            detail = resp.json().get("detail", {}).get("message", resp.text[:200])
+                        except Exception:
+                            detail = resp.text[:200]
+                        logger.error(f"Key #{key_index + 1} INVALID (401): {detail}")
+                        return {"valid": False, "error": "invalid_key", "detail": detail}
+                    elif resp.status_code == 402:
+                        detail = ""
+                        try:
+                            detail = resp.json().get("detail", {}).get("message", resp.text[:200])
+                        except Exception:
+                            detail = resp.text[:200]
+                        logger.error(f"Key #{key_index + 1} NO QUOTA (402): {detail}")
+                        return {"valid": False, "error": "no_quota", "detail": detail}
+                    elif resp.status_code == 404:
+                        detail = ""
+                        try:
+                            detail = resp.json().get("detail", {}).get("message", resp.text[:200])
+                        except Exception:
+                            detail = resp.text[:200]
+                        logger.error(
+                            f"Key #{key_index + 1} NOT FOUND (404): {detail} "
+                            f"— voice={voice_id} or model={model_id} may be invalid"
+                        )
+                        return {"valid": False, "error": "not_found", "detail": detail}
+                    else:
+                        await resp.aread()
+                        logger.error(f"Key #{key_index + 1} HTTP {resp.status_code}: {resp.text[:200]}")
+                        return {"valid": False, "error": f"http_{resp.status_code}", "detail": resp.text[:200]}
         except Exception as e:
             logger.error(f"Key #{key_index + 1} validation error: {e}")
             return {"valid": False, "error": "exception", "detail": str(e)}

@@ -345,6 +345,76 @@ async def view_conversation(request: Request, interview_id: str = Path(...)):
     )
 
 
+@app.get("/evaluations", response_class=HTMLResponse)
+async def list_evaluations(request: Request):
+    """List all interviews that have a completed evaluation."""
+    db = _get_db()
+    cursor = db["interviews"].find(
+        {"evaluation": {"$exists": True}},
+        {
+            "interview_id": 1,
+            "status": 1,
+            "phase": 1,
+            "turn_count": 1,
+            "started_at": 1,
+            "ended_at": 1,
+            "candidate_cv": 1,
+            "evaluation.recommendation": 1,
+            "evaluation.score": 1,
+            "evaluation.generated_at": 1,
+        },
+    ).sort("started_at", -1).limit(100)
+    evaluations = await cursor.to_list(length=100)
+    for ev in evaluations:
+        ev["_id"] = str(ev["_id"])
+        if ev.get("started_at") and ev.get("ended_at"):
+            delta = ev["ended_at"] - ev["started_at"]
+            ev["duration_min"] = round(delta.total_seconds() / 60, 1)
+        else:
+            ev["duration_min"] = None
+    return templates.TemplateResponse(
+        "evaluations.html", {"request": request, "evaluations": evaluations}
+    )
+
+
+@app.get("/evaluation/{interview_id}", response_class=HTMLResponse)
+async def view_evaluation(request: Request, interview_id: str = Path(...)):
+    """Show full evaluation card + complete conversation for one interview."""
+    db = _get_db()
+    interview = await db["interviews"].find_one({"interview_id": interview_id})
+    if not interview:
+        raise HTTPException(status_code=404, detail="Interview not found")
+    interview["_id"] = str(interview["_id"])
+
+    messages = await db["transcripts"].find(
+        {"interview_id": interview_id},
+        {"speaker": 1, "text": 1, "timestamp": 1, "audio_url": 1, "_id": 1},
+    ).sort("timestamp", 1).to_list(length=None)
+
+    for msg in messages:
+        msg["_id"] = str(msg["_id"])
+        raw_url = msg.get("audio_url")
+        msg["has_audio"] = bool(
+            raw_url and raw_url not in ("played", "tts_skipped")
+        )
+
+    duration_min = None
+    if interview.get("started_at") and interview.get("ended_at"):
+        delta = interview["ended_at"] - interview["started_at"]
+        duration_min = round(delta.total_seconds() / 60, 1)
+
+    return templates.TemplateResponse(
+        "evaluation.html",
+        {
+            "request": request,
+            "interview": interview,
+            "messages": messages,
+            "evaluation": interview.get("evaluation", {}),
+            "duration_min": duration_min,
+        },
+    )
+
+
 @app.get("/api/audio/{file_id}")
 async def serve_audio(file_id: str = Path(...)):
     """Serve audio file from GridFS for playback in the UI."""
