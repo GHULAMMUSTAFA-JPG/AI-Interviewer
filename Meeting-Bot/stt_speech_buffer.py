@@ -1,5 +1,12 @@
 """
-Speech Buffer Management — handles candidate speech buffering and DB persistence.
+STT Speech Buffer — buffers candidate speech and saves to MongoDB.
+
+Handles:
+- Accumulating speech segments
+- Noise filtering (min 2 words)
+- Deduplication
+- Delayed flush (500ms after SPEECH_END, 2s safety net)
+- MongoDB persistence
 """
 import asyncio
 from logger import push_log
@@ -9,7 +16,7 @@ from mongo_handler import insert_transcript
 _speech_buffer = ""
 _speech_timer = None
 _last_saved_text = ""
-last_speech_time = 0  # Will be initialized when event loop starts
+last_speech_time = 0  # Initialized when event loop starts
 
 
 def init_speech_state():
@@ -18,40 +25,49 @@ def init_speech_state():
     last_speech_time = asyncio.get_event_loop().time()
 
 
+async def _delayed_flush(interview_id: str, delay_sec: float) -> None:
+    """Wait delay_sec seconds, then flush the speech buffer if it has content."""
+    await asyncio.sleep(delay_sec)
+    if get_speech_buffer().strip():
+        await _flush_speech_buffer(interview_id)
+
+
 async def _flush_speech_buffer(interview_id: str) -> None:
     """Save buffered speech to DB after candidate stops speaking."""
     global _speech_buffer, _speech_timer, _last_saved_text, last_speech_time
 
-    # Clear the timer reference without cancelling — this function IS the task
+    # Clear the timer reference
     _speech_timer = None
 
     if _speech_buffer.strip():
         current_text = _speech_buffer.strip()
 
-        # FIX: Filter noise artifacts — require at least 2 words
+        # Filter noise artifacts — require at least 2 words
         words = current_text.split()
         if len(words) < 2:
-            msg = f"⚠️  [NOISE FILTERED] Too short ({len(words)} word): \"{current_text}\""
+            msg = f"[NOISE FILTERED] Too short ({len(words)} word): \"{current_text}\""
             print(msg); await push_log(msg)
             _speech_buffer = ""
             return
 
         # Dedup: don't save identical text twice in a row
         if current_text == _last_saved_text:
-            msg = "⚠️  [DUPLICATE PREVENTED] Same text as last save — discarding"
+            msg = "[DUPLICATE PREVENTED] Same text as last save -- discarding"
             print(msg); await push_log(msg)
             _speech_buffer = ""
             return
 
         # Save to DB
         await insert_transcript(interview_id, "candidate", current_text)
-        msg = f"💬 [SAVED TO DB] \"{current_text[:120]}{'...' if len(current_text) > 120 else ''}\""
+        msg = f"[SAVED TO DB] \"{current_text[:120]}{'...' if len(current_text) > 120 else ''}\""
         print(msg); await push_log(msg)
 
         _last_saved_text = current_text
-        last_speech_time = asyncio.get_event_loop().time()  # reset inactivity clock
+        last_speech_time = asyncio.get_event_loop().time()
         _speech_buffer = ""
 
+
+# ─── Buffer Accessors ───────────────────────────────────────────────
 
 def get_speech_buffer():
     """Get current speech buffer content."""
