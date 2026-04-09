@@ -154,11 +154,8 @@ async def join_meeting_and_transcribe(
             status_state = {"bot_speaking": False}
 
             # Create console handler for STT events
-            async def flush_callback(int_id):
-                return await _flush_speech_buffer(int_id)
-
             await create_console_handler(
-                page, interview_id, status_state, db, mongo_connected, flush_callback
+                page, interview_id, status_state, db, mongo_connected
             )
             page.on('pageerror', lambda err: print(f"[PAGE ERROR] {err}"))
 
