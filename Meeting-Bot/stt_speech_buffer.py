@@ -18,6 +18,14 @@ _speech_timer = None
 _last_saved_text = ""
 last_speech_time = 0  # Initialized when event loop starts
 
+# Single-word responses that are valid interview answers — never noise-filter these
+VALID_SHORT_ANSWERS = {
+    "yes", "no", "yeah", "nope", "yep", "nah", "right", "correct", "wrong",
+    "okay", "ok", "sure", "fine", "agreed", "agree", "exactly", "absolutely",
+    "definitely", "certainly", "perhaps", "maybe", "possibly", "true", "false",
+    "never", "always", "sometimes", "often", "rarely", "unclear", "unsure"
+}
+
 
 def init_speech_state():
     """Initialize global speech state (call once when event loop starts)."""
@@ -42,9 +50,13 @@ async def _flush_speech_buffer(interview_id: str) -> None:
     if _speech_buffer.strip():
         current_text = _speech_buffer.strip()
 
-        # Filter noise artifacts — require at least 2 words
+        # Filter noise artifacts — require at least 2 words unless it's a known valid short answer
         words = current_text.split()
-        if len(words) < 2:
+        is_valid_short = (
+            len(words) == 1
+            and current_text.lower().rstrip(".,!?") in VALID_SHORT_ANSWERS
+        )
+        if len(words) < 2 and not is_valid_short:
             msg = f"[NOISE FILTERED] Too short ({len(words)} word): \"{current_text}\""
             print(msg); await push_log(msg)
             _speech_buffer = ""
@@ -81,7 +93,14 @@ def set_speech_buffer(text: str):
 
 
 def clear_speech_buffer():
-    """Clear speech buffer without saving."""
+    """Clear speech buffer without saving. Preserves _last_saved_text for dedup."""
+    global _speech_buffer, _speech_timer
+    _speech_buffer = ""
+    _speech_timer = None
+
+
+def reset_session():
+    """Full reset for a new interview session — clears buffer AND dedup state."""
     global _speech_buffer, _speech_timer, _last_saved_text
     _speech_buffer = ""
     _speech_timer = None
@@ -102,6 +121,14 @@ def set_speech_timer(timer):
     """Set speech timer reference."""
     global _speech_timer
     _speech_timer = timer
+
+
+def cancel_pending_flush():
+    """Cancel any pending delayed flush task. Call this on interview shutdown."""
+    global _speech_timer
+    if _speech_timer and not _speech_timer.done():
+        _speech_timer.cancel()
+    _speech_timer = None
 
 
 def update_last_speech_time():
