@@ -79,25 +79,36 @@ async def download_audio_from_gridfs(audio_id: str) -> bytes | None:
 async def insert_transcript(interview_id: str, speaker: str, text: str) -> bool:
     """
     Insert one candidate caption into interviews.transcripts.
+    Retries up to 3 times with 1s backoff on transient failures.
 
     Schema matches what Main-Agent's change stream expects:
       { interview_id, speaker="candidate", text, audio_url=null, timestamp }
     """
+    import asyncio as _asyncio
     if db is None:
         return False
-    try:
-        doc = {
-            "interview_id": interview_id,
-            "speaker": speaker,
-            "text": text,
-            "audio_url": None,
-            "timestamp": datetime.utcnow(),
-        }
-        result = await db["transcripts"].insert_one(doc)
-        msg = f"Transcript inserted (id={result.inserted_id})"
-        print(msg); await push_log(msg)
-        return True
-    except Exception as e:
-        msg = f"Transcript insert error: {e}"
-        print(msg); await push_log(msg)
-        return False
+
+    doc = {
+        "interview_id": interview_id,
+        "speaker": speaker,
+        "text": text,
+        "audio_url": None,
+        "timestamp": datetime.utcnow(),
+    }
+
+    for attempt in range(1, 4):
+        try:
+            result = await db["transcripts"].insert_one(doc)
+            msg = f"Transcript inserted (id={result.inserted_id})"
+            print(msg); await push_log(msg)
+            return True
+        except Exception as e:
+            if attempt == 3:
+                msg = f"Transcript insert FAILED after 3 attempts: {e}"
+                print(msg); await push_log(msg)
+                return False
+            msg = f"Transcript insert error (attempt {attempt}/3), retrying in 1s: {e}"
+            print(msg); await push_log(msg)
+            await _asyncio.sleep(1)
+
+    return False
