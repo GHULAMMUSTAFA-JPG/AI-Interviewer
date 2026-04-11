@@ -44,14 +44,24 @@ SPEECH_INJECTION_SCRIPT = """
     let interruptConfirmed    = false; // interrupt already sent this bot turn
 
     // ─── Constants ───────────────────────────────────────────────
-    const SILENCE_MS           = 1500;  // ms of silence after last confirmed word → save (allow natural pauses)
-    const ECHO_GATE_MS         = 1500;  // ms to ignore STT after bot stops (covers Google STT queue)
-    const MAX_SPEECH_MS        = 25000; // ms — force-save when onspeechend never fires (bg noise)
+    const SILENCE_MS           = 2500;  // ms of silence after last confirmed word → save (candidates pause mid-thought)
+    const ECHO_GATE_MS         = 700;   // ms to ignore STT after bot stops (Google STT queue drains in ~300-500ms)
+    const MAX_SPEECH_MS        = 45000; // ms — force-save when onspeechend never fires (technical answers exceed 25s)
     const MIN_CONFIDENCE       = 0.55;  // discard finals below this; 0 = not reported → keep
     const MIN_WORDS            = 2;     // discard saves shorter than this (noise artifacts)
     const INTERRUPT_CONFIRM_MS = 1000;  // ms window to confirm interrupt via onresult
     const MIN_INTERRUPT_WORDS  = 1;     // words required in onresult to confirm real interruption
     const MAX_RESTART_BACKOFF  = 4000;  // ms — max backoff cap for recognition restarts (was 16000)
+
+    // ─── Short-answer lexicon ────────────────────────────────────
+    // Single words that are valid interview responses — never discard these
+    // even though they fall below MIN_WORDS=2.
+    const VALID_SHORT_ANSWERS = new Set([
+        "yes","no","yeah","nope","yep","nah","right","correct","wrong",
+        "okay","ok","sure","fine","agreed","agree","exactly","absolutely",
+        "definitely","certainly","perhaps","maybe","possibly","true","false",
+        "never","always","sometimes","often","rarely","unclear","unsure"
+    ]);
 
     // ─── Python bridge ───────────────────────────────────────────
     function emit(tag, data) {
@@ -75,10 +85,11 @@ SPEECH_INJECTION_SCRIPT = """
         // Shared save path used by silence timer and MAX_SPEECH force-save.
         const text  = transcript.trim();
         const words = text ? text.split(/\\s+/).length : 0;
-        if (text && words >= MIN_WORDS && !isBotSpeaking) {
+        const isValidShort = words === 1 && VALID_SHORT_ANSWERS.has(text.toLowerCase().replace(/[.!?,]$/, ""));
+        if (text && (words >= MIN_WORDS || isValidShort) && !isBotSpeaking) {
             emit("TRANSCRIPT_EVENT:", text);
             transcript = "";
-        } else if (text && words < MIN_WORDS) {
+        } else if (text && words < MIN_WORDS && !isValidShort) {
             emit("STT_SHORT_DISCARD:", text);
             transcript = "";
         }
@@ -185,8 +196,12 @@ SPEECH_INJECTION_SCRIPT = """
             if (isBotSpeaking) {
                 if (pendingInterruptTimer && !interruptConfirmed) {
                     for (let i = event.resultIndex; i < event.results.length; i++) {
-                        const text = event.results[i][0].transcript.trim();
-                        if (text && text.split(/\\s+/).length >= MIN_INTERRUPT_WORDS) {
+                        const result = event.results[i];
+                        const text   = result[0].transcript.trim();
+                        const conf   = result[0].confidence;
+                        // Require ≥1 word AND confidence above noise threshold (or unreported conf=0)
+                        const confOk = (conf === 0 || conf >= 0.4);
+                        if (text && text.split(/\\s+/).length >= MIN_INTERRUPT_WORDS && confOk) {
                             // Real speech confirmed — interrupt the bot
                             clearTimeout(pendingInterruptTimer);
                             pendingInterruptTimer = null;
