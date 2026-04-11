@@ -44,22 +44,24 @@ async def create_console_handler(page, interview_id: str, status_state: dict,
             if text.startswith('STT_SPEECH_START:'):
                 update_last_speech_time()
                 if status_state["bot_speaking"]:
-                    # Candidate is cutting in — clear stale buffer and signal interrupt
+                    # Candidate is cutting in — clear stale buffer and signal interrupt.
+                    # Use create_task so the DB write does not block the console handler loop.
                     timer = get_speech_timer()
                     if timer and not timer.done():
                         timer.cancel()
                         set_speech_timer(None)
                     clear_speech_buffer()
                     if mongo_connected and db is not None:
-                        try:
-                            await db.interviews.update_one(
-                                {"interview_id": interview_id},
-                                {"$set": {"tts_interrupt": True}}
-                            )
-                            msg_log = "[INTERRUPT] Candidate interrupted bot"
-                            print(msg_log); await push_log(msg_log)
-                        except Exception as int_err:
-                            print(f"Interrupt signal error: {int_err}")
+                        async def _write_interrupt():
+                            try:
+                                await db.interviews.update_one(
+                                    {"interview_id": interview_id},
+                                    {"$set": {"tts_interrupt": True}}
+                                )
+                                await push_log("[INTERRUPT] Candidate interrupted bot")
+                            except Exception as int_err:
+                                print(f"Interrupt signal error: {int_err}")
+                        asyncio.create_task(_write_interrupt())
                 else:
                     msg_log = "[SPEECH STARTED] Candidate speaking..."
                     print(msg_log); await push_log(msg_log)
