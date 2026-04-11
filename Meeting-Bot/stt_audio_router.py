@@ -109,6 +109,7 @@ async def _get_source_index(name: str) -> str | None:
                 return parts[0]
     except Exception:
         pass
+    print(f"PulseAudio source '{name}' not found — audio routing may be broken")
     return None
 
 
@@ -197,26 +198,45 @@ async def _verify_source_outputs():
         mic_idx    = await _get_source_index("virtual_mic_source")
         botmic_idx = await _get_source_index("BotMic")
 
-        # Chrome creates source-outputs in order: WebRTC first, STT second.
-        # Assign by index order (PulseAudio assigns incrementing indices).
-        chrome_sos.sort(key=lambda so: int(so.get("index", "0")))
+        # Identify by media.name — reliable across reconnects.
+        # Chrome labels Web Speech API streams as "VoiceCapture" or containing "speech".
+        # WebRTC mic streams use "webrtc" or "WebRTC" in media.name.
+        # Fall back to creation-order only if media.name is missing on both.
+        def _classify(so: dict) -> str:
+            """Return 'stt', 'webrtc', or 'unknown' based on media.name."""
+            media = so.get("media_name", "").lower()
+            if "speech" in media or "voice" in media or "capture" in media:
+                return "stt"
+            if "webrtc" in media or "web rtc" in media:
+                return "webrtc"
+            return "unknown"
+
+        for so in chrome_sos:
+            so["_role"] = _classify(so)
+
+        # If media.name classification fails for all, fall back to index order
+        roles_known = any(so["_role"] != "unknown" for so in chrome_sos)
+        if not roles_known:
+            chrome_sos.sort(key=lambda so: int(so.get("index", "0")))
+            for i, so in enumerate(chrome_sos):
+                so["_role"] = "webrtc" if i == 0 else "stt"
 
         fixed = 0
-        for i, so in enumerate(chrome_sos):
+        for so in chrome_sos:
             so_idx = so.get("index")
             src_name = so.get("source_name", "")
             src_idx = so.get("source_index", "")
+            role = so["_role"]
 
-            if i == 0:
-                # First Chrome source-output = WebRTC mic -> virtual_mic_source
-                target_source = "virtual_mic_source"
-                target_idx = mic_idx
-                label = "WebRTC"
-            else:
-                # Second+ Chrome source-output = STT -> BotMic
+            if role == "stt":
                 target_source = "BotMic"
                 target_idx = botmic_idx
                 label = "STT"
+            else:
+                # webrtc or unknown — default to virtual_mic_source
+                target_source = "virtual_mic_source"
+                target_idx = mic_idx
+                label = "WebRTC"
 
             # Check if already on correct source
             if src_name == target_source or src_idx == target_idx:
