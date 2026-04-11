@@ -1,11 +1,12 @@
 """
 STT Echo Guard — watches bot_speaking flag to gate STT during TTS playback.
 
-Uses TWO mechanisms for robust echo prevention:
-1. Redis pub/sub (instant, ~10-50ms): TTS publishes tts_status → we gate immediately
-2. MongoDB change stream (fallback, ~1-6s): catches Redis misses
+PRIMARY: Redis pub/sub (~10-50ms).
+FALLBACK: MongoDB change stream (~1-6s), only activated if Redis is unavailable
+          or crashes — never runs simultaneously with Redis.
 
 When bot_speaking becomes True:
+    → Wait 500ms (matches interrupt_handler block window) then clear buffer
     → Call __tts_started() in browser (discards STT events)
 When bot_speaking becomes False:
     → Call __tts_ended(wasInterrupted) in browser
@@ -15,54 +16,59 @@ import asyncio
 import json
 from logger import push_log
 
+# Must match interrupt_handler.INTERRUPT_BLOCK_WINDOW_SEC (0.5s).
+# Any candidate speech recorded in this window before the bot starts
+# is legitimate — delaying the buffer clear preserves it.
+_BUFFER_CLEAR_DELAY_SEC = 0.5
+
 
 async def create_echo_guard_watcher(db, interview_id: str, status_state: dict,
                                      page, mongo_connected: bool = False):
     """
-    Watch for bot speaking state changes using Redis + MongoDB.
+    Watch for bot speaking state changes — Redis primary, MongoDB fallback only.
 
-    Redis pub/sub gives instant notification (~10-50ms) when TTS starts/stops.
-    MongoDB change stream is a fallback for when Redis is unavailable.
+    Tries Redis first. If Redis is unavailable or crashes mid-session, falls back
+    to the MongoDB change stream. They never run simultaneously, preventing the
+    double __tts_started() / __tts_ended() race that wiped interrupt state.
     """
-    # Start Redis watcher as primary (fast)
-    redis_task = None
-    try:
-        from redis_client import get_redis
-        redis_task = asyncio.create_task(
-            _watch_tts_status_redis(interview_id, status_state, page)
-        )
-    except Exception as e:
-        msg = f"Redis echo watcher unavailable: {e} — using MongoDB fallback"
-        print(msg); await push_log(msg)
-
-    # Start MongoDB watcher as fallback
-    mongo_task = None
-    if mongo_connected and db is not None:
-        mongo_task = asyncio.create_task(
-            _watch_bot_speaking_mongo(db, interview_id, status_state, page)
-        )
-
-    # Return a wrapper that can cancel both
-    async def _combined_watcher():
-        tasks = [t for t in (redis_task, mongo_task) if t is not None]
-        if not tasks:
-            msg = "Bot speaking watcher skipped — no Redis or MongoDB available"
+    async def _run():
+        redis_ok = False
+        try:
+            from redis_client import get_redis
+            await get_redis()
+            redis_ok = True
+        except Exception as e:
+            msg = f"Redis echo guard unavailable: {e} — using MongoDB fallback"
             print(msg); await push_log(msg)
-            return
 
-        msg = f"Echo guard active: Redis={redis_task is not None}, MongoDB={mongo_task is not None}"
-        print(msg); await push_log(msg)
-
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-        for t in done:
-            if t.exception():
-                msg = f"Echo guard task failed: {t.exception()}"
+        if redis_ok:
+            msg = "Echo guard: Redis primary active"
+            print(msg); await push_log(msg)
+            try:
+                await _watch_tts_status_redis(interview_id, status_state, page)
+                return  # clean shutdown
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                msg = f"Redis echo guard crashed: {e} — activating MongoDB fallback"
                 print(msg); await push_log(msg)
-        # Keep remaining tasks running
-        for t in pending:
-            t.cancel()
 
-    return asyncio.create_task(_combined_watcher())
+        # Redis unavailable or crashed — MongoDB fallback
+        if mongo_connected and db is not None:
+            msg = "Echo guard: MongoDB fallback active"
+            print(msg); await push_log(msg)
+            try:
+                await _watch_bot_speaking_mongo(db, interview_id, status_state, page)
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                msg = f"MongoDB echo guard failed: {e}"
+                print(msg); await push_log(msg)
+        else:
+            msg = "Echo guard skipped — no Redis or MongoDB available"
+            print(msg); await push_log(msg)
+
+    return asyncio.create_task(_run())
 
 
 async def _watch_tts_status_redis(interview_id: str, status_state: dict, page):
@@ -71,6 +77,9 @@ async def _watch_tts_status_redis(interview_id: str, status_state: dict, page):
 
     TTS service publishes tts_status events when it starts/stops speaking.
     This gives ~10-50ms latency vs MongoDB change stream's 1-6 seconds.
+
+    Buffer clear is delayed by _BUFFER_CLEAR_DELAY_SEC so that candidate speech
+    recorded just before the bot starts is not silently dropped.
     """
     retry_delay = 1.0
     while True:
@@ -82,7 +91,7 @@ async def _watch_tts_status_redis(interview_id: str, status_state: dict, page):
             await pubsub.subscribe(channel)
 
             retry_delay = 1.0
-            msg = f"🔴 Echo guard: subscribed to Redis channel {channel}"
+            msg = f"Echo guard: subscribed to Redis channel {channel}"
             print(msg); await push_log(msg)
 
             async for message in pubsub.listen():
@@ -99,8 +108,14 @@ async def _watch_tts_status_redis(interview_id: str, status_state: dict, page):
                     status_state["bot_speaking"] = is_speaking
 
                     if is_speaking:
-                        msg = "🔇 Bot speaking (Redis) — clearing buffer + gating STT"
+                        msg = "Bot speaking (Redis) — delaying buffer clear + gating STT"
                         print(msg); await push_log(msg)
+
+                        # Delay matches interrupt_handler block window (500ms).
+                        # Candidate words spoken just before the bot starts are
+                        # preserved in the buffer during this window.
+                        await asyncio.sleep(_BUFFER_CLEAR_DELAY_SEC)
+
                         from stt_speech_buffer import clear_speech_buffer
                         clear_speech_buffer()
                         try:
@@ -109,10 +124,9 @@ async def _watch_tts_status_redis(interview_id: str, status_state: dict, page):
                             msg = f"__tts_started eval error: {eval_err}"
                             print(msg); await push_log(msg)
                     else:
-                        # Check if there was an interrupt
                         was_interrupted = data.get("interrupted", False)
                         gate_label = "no echo gate (interrupted)" if was_interrupted else "echo gate active"
-                        msg = f"🔊 Bot done speaking (Redis) — resuming STT ({gate_label})"
+                        msg = f"Bot done speaking (Redis) — resuming STT ({gate_label})"
                         print(msg); await push_log(msg)
                         try:
                             js_flag = "true" if was_interrupted else "false"
@@ -137,7 +151,7 @@ async def _watch_tts_status_redis(interview_id: str, status_state: dict, page):
 async def _watch_bot_speaking_mongo(db, interview_id: str, status_state: dict, page):
     """
     Fallback echo guard: watch MongoDB for bot_speaking changes.
-    Slower (1-6s) but reliable even if Redis pub/sub fails.
+    Only runs when Redis is completely unavailable. Slower (1-6s) but reliable.
     """
     pipeline = [
         {
@@ -151,7 +165,7 @@ async def _watch_bot_speaking_mongo(db, interview_id: str, status_state: dict, p
     retry_delay = 1.0
     while True:
         try:
-            msg = "Bot speaking watcher (MongoDB fallback): change stream opened"
+            msg = "Echo guard (MongoDB fallback): change stream opened"
             print(msg); await push_log(msg)
             async with db.interviews.watch(pipeline, full_document="updateLookup") as stream:
                 retry_delay = 1.0
@@ -166,8 +180,12 @@ async def _watch_bot_speaking_mongo(db, interview_id: str, status_state: dict, p
                         status_state["bot_speaking"] = is_speaking
 
                         if is_speaking:
-                            msg = "🔇 Bot speaking (MongoDB fallback) — clearing buffer + gating STT"
+                            msg = "Bot speaking (MongoDB fallback) — delaying buffer clear + gating STT"
                             print(msg); await push_log(msg)
+
+                            # Same delay as Redis path for consistency
+                            await asyncio.sleep(_BUFFER_CLEAR_DELAY_SEC)
+
                             from stt_speech_buffer import clear_speech_buffer
                             clear_speech_buffer()
                             try:
@@ -178,7 +196,7 @@ async def _watch_bot_speaking_mongo(db, interview_id: str, status_state: dict, p
                         else:
                             was_interrupted = bool(full_doc.get("tts_interrupt", False))
                             gate_label = "no echo gate (interrupted)" if was_interrupted else "echo gate active"
-                            msg = f"🔊 Bot done speaking (MongoDB fallback) — resuming STT ({gate_label})"
+                            msg = f"Bot done speaking (MongoDB fallback) — resuming STT ({gate_label})"
                             print(msg); await push_log(msg)
                             try:
                                 js_flag = "true" if was_interrupted else "false"

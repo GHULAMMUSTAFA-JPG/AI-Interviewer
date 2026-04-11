@@ -167,6 +167,10 @@ async def join_meeting_and_transcribe(
                 if "meet.google.com" not in url and url not in ("about:blank", ""):
                     msg = f"🚨 Page navigated away from Meet → {url} — bot was removed"
                     print(msg); await push_log(msg)
+                    try:
+                        await page.evaluate("window.__stop_interview()")
+                    except Exception:
+                        pass
                     if mongo_connected and db is not None:
                         try:
                             await db.interviews.update_one(
@@ -439,6 +443,10 @@ async def join_meeting_and_transcribe(
                         if elapsed > INACTIVITY_TIMEOUT:
                             msg = f"⏰ Meeting TIMEOUT ({INACTIVITY_TIMEOUT}s) — no candidate speech"
                             print(msg); await push_log(msg)
+                            try:
+                                await page.evaluate("window.__stop_interview()")
+                            except Exception:
+                                pass
                             if mongo_connected:
                                 await db.interviews.update_one(
                                     {"interview_id": interview_id},
