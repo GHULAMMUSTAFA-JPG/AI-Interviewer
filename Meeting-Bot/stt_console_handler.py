@@ -64,13 +64,13 @@ async def create_console_handler(page, interview_id: str, status_state: dict,
                         asyncio.create_task(_write_interrupt())
                 else:
                     msg_log = "[SPEECH STARTED] Candidate speaking..."
-                    print(msg_log); await push_log(msg_log)
+                    await push_log(msg_log)
                 return
 
             # ─── Speech End ────────────────────────────────────────
             if text.startswith('STT_SPEECH_END:'):
                 msg_log = "[SPEECH ENDED] Waiting for final transcript..."
-                print(msg_log); await push_log(msg_log)
+                await push_log(msg_log)
 
                 # Flush after 500ms to catch any last TRANSCRIPT_EVENT from JS
                 timer = get_speech_timer()
@@ -91,7 +91,7 @@ async def create_console_handler(page, interview_id: str, status_state: dict,
                     update_last_speech_time()
 
                     msg_log = f"[STT FINAL] \"{final_text[:80]}\""
-                    print(msg_log); await push_log(msg_log)
+                    await push_log(msg_log)
 
                     # Start a delayed flush as safety net (2s) in case SPEECH_END never fires
                     timer = get_speech_timer()
@@ -104,7 +104,7 @@ async def create_console_handler(page, interview_id: str, status_state: dict,
             # ─── STT Errors ────────────────────────────────────────
             if text.startswith('STT_ERROR:') or text.startswith('STT_LOW_CONF:'):
                 msg_log = f"[STT] {text[:200]}"
-                print(msg_log); await push_log(msg_log)
+                await push_log(msg_log)
 
         except Exception as e:
             print(f"Console handler error: {e}")

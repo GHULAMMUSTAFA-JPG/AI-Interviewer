@@ -34,7 +34,7 @@ async def watch_for_leave(interview_id: str, page, db=None, mongo_connected=Fals
         leave_triggered.set()
 
         msg = f"Leaving meeting (reason={reason}, status={current_status})"
-        print(msg); await push_log(msg)
+        await push_log(msg)
 
         # Stop the Web Speech API cleanly before leaving
         try:
@@ -79,7 +79,7 @@ async def watch_for_leave(interview_id: str, page, db=None, mongo_connected=Fals
             pubsub = redis.pubsub()
             await pubsub.subscribe("interview.events")
             msg = "Leave watcher: Redis fast-stop active"
-            print(msg); await push_log(msg)
+            await push_log(msg)
 
             async for message in pubsub.listen():
                 if leave_triggered.is_set():
@@ -102,7 +102,7 @@ async def watch_for_leave(interview_id: str, page, db=None, mongo_connected=Fals
             return
         except Exception as e:
             msg = f"Redis leave watcher unavailable: {e} — MongoDB poll is the only guard"
-            print(msg); await push_log(msg)
+            await push_log(msg)
 
     async def _mongo_poll_watcher() -> None:
         """
@@ -120,7 +120,7 @@ async def watch_for_leave(interview_id: str, page, db=None, mongo_connected=Fals
             elapsed = asyncio.get_event_loop().time() - start_time
             if elapsed > timeout_seconds:
                 msg = f"Meeting TIMEOUT ({timeout_seconds}s) — leaving"
-                print(msg); await push_log(msg)
+                await push_log(msg)
                 try:
                     if mongo_connected and db:
                         await db.interviews.update_one(
@@ -145,7 +145,7 @@ async def watch_for_leave(interview_id: str, page, db=None, mongo_connected=Fals
 
                 if current_status != last_status_check:
                     msg = f"Status check: {current_status} (was: {last_status_check})"
-                    print(msg); await push_log(msg)
+                    await push_log(msg)
                     last_status_check = current_status
 
                 if interview and current_status in ("abandoned", "completed"):

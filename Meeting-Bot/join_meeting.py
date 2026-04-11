@@ -64,7 +64,7 @@ async def join_meeting_and_transcribe(
     name = email.split("@")[0]
 
     msg = f"🤖 Bot: {name}  [WEB SPEECH API]  lang={STT_LANGUAGE}  session={session_id}"
-    print(msg); await push_log(msg)
+    await push_log(msg)
 
     # Pre-grant microphone permission
     _prefs_dir = Path(temp_dir) / "Default"
@@ -90,7 +90,7 @@ async def join_meeting_and_transcribe(
 
     if not mongo_connected:
         msg = "⚠️  Continuing without MongoDB (local transcripts only)"
-        print(msg); await push_log(msg)
+        await push_log(msg)
 
     await set_bot_state(interview_id, "joining", db, mongo_connected)
 
@@ -104,13 +104,13 @@ async def join_meeting_and_transcribe(
                     try:
                         lock_file.unlink()
                         msg = f"🔧 Removed stale Chrome lock file: {lock_name}"
-                        print(msg); await push_log(msg)
+                        await push_log(msg)
                     except Exception as e:
                         msg = f"⚠️  Failed to remove {lock_name}: {e} (will try anyway)"
-                        print(msg); await push_log(msg)
+                        await push_log(msg)
 
             msg = "🌐 Launching Chromium (with persistent profile)..."
-            print(msg); await push_log(msg)
+            await push_log(msg)
 
             ctx = await p.chromium.launch_persistent_context(
                 user_data_dir=chrome_profile_dir,
@@ -144,7 +144,7 @@ async def join_meeting_and_transcribe(
             )
 
             msg = f"✅ Chrome launched with profile: {chrome_profile_dir}"
-            print(msg); await push_log(msg)
+            await push_log(msg)
 
             await ctx.grant_permissions(["microphone"], origin="https://meet.google.com")
 
@@ -166,7 +166,7 @@ async def join_meeting_and_transcribe(
                 url = page.url
                 if "meet.google.com" not in url and url not in ("about:blank", ""):
                     msg = f"🚨 Page navigated away from Meet → {url} — bot was removed"
-                    print(msg); await push_log(msg)
+                    await push_log(msg)
                     try:
                         await page.evaluate("window.__stop_interview()")
                     except Exception:
@@ -209,12 +209,12 @@ async def join_meeting_and_transcribe(
 
             # Navigate to meeting
             msg = f"🌐 Navigating → {url}"
-            print(msg); await push_log(msg)
+            await push_log(msg)
             try:
                 await page.goto(url, timeout=60000, wait_until="domcontentloaded")
             except Exception as e:
                 msg = f"❌ Navigation failed: {e}"
-                print(msg); await push_log(msg)
+                await push_log(msg)
                 await ctx.close()
                 return
 
@@ -230,7 +230,7 @@ async def join_meeting_and_transcribe(
                         await page.locator(selector).first.fill(f"{name} (AI)")
                         await page.wait_for_timeout(1000)
                         msg = "✅ Guest name entered"
-                        print(msg); await push_log(msg)
+                        await push_log(msg)
                         break
                 except Exception:
                     pass
@@ -241,7 +241,7 @@ async def join_meeting_and_transcribe(
 
             # Click join button
             msg = "🔍 Clicking join button..."
-            print(msg); await push_log(msg)
+            await push_log(msg)
             joined = False
             for _ in range(15):
                 for txt in ["Ask to join", "Join now", "Join"]:
@@ -262,13 +262,13 @@ async def join_meeting_and_transcribe(
 
             if not joined:
                 msg = "❌ No join button found — aborting"
-                print(msg); await push_log(msg)
+                await push_log(msg)
                 await ctx.close()
                 return
 
             # Wait for admittance
             msg = "⏳ Waiting for host to admit (up to 10 min)..."
-            print(msg); await push_log(msg)
+            await push_log(msg)
             await set_bot_state(interview_id, "waiting", db, mongo_connected)
             admitted = False
             admission_start = asyncio.get_event_loop().time()
@@ -289,7 +289,7 @@ async def join_meeting_and_transcribe(
                     body = await page.evaluate("() => document.body.innerText.toLowerCase()")
                     if any(x in body for x in ["not found", "has ended", "denied", "removed from"]):
                         msg = "❌ Denied or removed or meeting ended during wait"
-                        print(msg); await push_log(msg)
+                        await push_log(msg)
                         await ctx.close()
                         return
                 except Exception:
@@ -298,7 +298,7 @@ async def join_meeting_and_transcribe(
                 elapsed = asyncio.get_event_loop().time() - admission_start
                 if elapsed > admission_timeout:
                     msg = f"❌ Not admitted after {admission_timeout}s — stuck in lobby"
-                    print(msg); await push_log(msg)
+                    await push_log(msg)
 
                     if mongo_connected:
                         await db.interviews.update_one(
@@ -310,13 +310,13 @@ async def join_meeting_and_transcribe(
                             }}
                         )
                         msg = "✅ Marked as abandoned in MongoDB"
-                        print(msg); await push_log(msg)
+                        await push_log(msg)
                     await set_bot_state(interview_id, "abandoned", db, mongo_connected)
                     await ctx.close()
                     return
 
             msg = "✅ Admitted to meeting!"
-            print(msg); await push_log(msg)
+            await push_log(msg)
 
             # ════════════════════════════════════════════════════════════
             # AUDIO ROUTING
@@ -326,7 +326,7 @@ async def join_meeting_and_transcribe(
             # ════════════════════════════════════════════════════════════
 
             msg = "⏳ Waiting 2 seconds for audio to stabilize..."
-            print(msg); await push_log(msg)
+            await push_log(msg)
             await page.wait_for_timeout(2000)
 
             # Route Chrome output → VirtualSink, switch default source → BotMic,
@@ -335,10 +335,10 @@ async def join_meeting_and_transcribe(
 
             # Inject Web Speech API → uses BotMic (new default source)
             msg = "🎤 Injecting Web Speech API..."
-            print(msg); await push_log(msg)
+            await push_log(msg)
             await inject_speech_recognition(page, session_id, STT_LANGUAGE)
             msg = "✅ Web Speech API active (capturing meeting audio via BotMic)"
-            print(msg); await push_log(msg)
+            await push_log(msg)
 
             # Short delay to let STT initialize
             await page.wait_for_timeout(500)
@@ -370,7 +370,7 @@ async def join_meeting_and_transcribe(
                             print(msg)
                 except Exception as e:
                     msg = f"⚠️  Heartbeat error: {e}"
-                    print(msg); await push_log(msg)
+                    await push_log(msg)
 
             heartbeat_task = asyncio.create_task(_send_heartbeat())
 
@@ -397,25 +397,25 @@ async def join_meeting_and_transcribe(
                                        f"backoff={health.get('restartBackoff')}ms, "
                                        f"active={is_active}, "
                                        f"bot_speaking={health.get('isBotSpeaking')}")
-                                print(msg); await push_log(msg)
+                                await push_log(msg)
 
                                 if not is_running and is_active:
                                     not_running_streak += 1
                                     if not_running_streak >= 3:
                                         # STT stalled for 30s — force restart
                                         msg = f"⚠️  STT stalled {not_running_streak * 10}s — force-restarting"
-                                        print(msg); await push_log(msg)
+                                        await push_log(msg)
                                         try:
                                             await page.evaluate("window.__stt_restart()")
                                             not_running_streak = 0
                                         except Exception as restart_err:
                                             msg = f"⚠️  STT force-restart failed: {restart_err}"
-                                            print(msg); await push_log(msg)
+                                            await push_log(msg)
                                 else:
                                     not_running_streak = 0
                             else:
                                 msg = "🎤 STT health: no data (page may be closed)"
-                                print(msg); await push_log(msg)
+                                await push_log(msg)
                         except Exception as stt_err:
                             msg = f"⚠️  STT health check failed: {stt_err}"
                             print(msg)
@@ -423,7 +423,7 @@ async def join_meeting_and_transcribe(
                     pass
                 except Exception as e:
                     msg = f"⚠️  STT monitor error: {e}"
-                    print(msg); await push_log(msg)
+                    await push_log(msg)
 
             stt_health_task = asyncio.create_task(_monitor_stt_health())
 
@@ -443,7 +443,7 @@ async def join_meeting_and_transcribe(
                                 raise RuntimeError(f"pactl info returned {proc.returncode}")
                         except Exception as pa_err:
                             msg = f"PulseAudio health check FAILED: {pa_err} — attempting restart"
-                            print(msg); await push_log(msg)
+                            await push_log(msg)
                             try:
                                 from redis_client import get_redis, RedisState
                                 redis = await get_redis()
@@ -459,15 +459,15 @@ async def join_meeting_and_transcribe(
                                 )
                                 await asyncio.wait_for(restart.communicate(), timeout=10)
                                 msg = "PulseAudio restart attempted"
-                                print(msg); await push_log(msg)
+                                await push_log(msg)
                             except Exception as restart_err:
                                 msg = f"PulseAudio restart failed: {restart_err}"
-                                print(msg); await push_log(msg)
+                                await push_log(msg)
                 except asyncio.CancelledError:
                     pass
                 except Exception as e:
                     msg = f"PulseAudio monitor error: {e}"
-                    print(msg); await push_log(msg)
+                    await push_log(msg)
 
             pa_health_task = asyncio.create_task(_monitor_pulseaudio_health())
 
@@ -486,7 +486,7 @@ async def join_meeting_and_transcribe(
                         elapsed = asyncio.get_event_loop().time() - get_last_speech_time()
                         if elapsed > INACTIVITY_TIMEOUT:
                             msg = f"⏰ Meeting TIMEOUT ({INACTIVITY_TIMEOUT}s) — no candidate speech"
-                            print(msg); await push_log(msg)
+                            await push_log(msg)
                             try:
                                 await page.evaluate("window.__stop_interview()")
                             except Exception:
@@ -508,7 +508,7 @@ async def join_meeting_and_transcribe(
                     pass
                 except Exception as e:
                     msg = f"⚠️  Inactivity checker error: {e}"
-                    print(msg); await push_log(msg)
+                    await push_log(msg)
 
             inactivity_task = asyncio.create_task(_check_inactivity())
 
@@ -539,16 +539,16 @@ async def join_meeting_and_transcribe(
                                 try:
                                     if get_speech_buffer().strip():
                                         msg = "🤖 Agent incoming — flushing partial candidate buffer"
-                                        print(msg); await push_log(msg)
+                                        await push_log(msg)
                                         await _flush_speech_buffer(interview_id)
                                 except Exception as inner_err:
                                     msg = f"⚠️ Agent transcript watcher inner error: {inner_err}"
-                                    print(msg); await push_log(msg)
+                                    await push_log(msg)
                     except asyncio.CancelledError:
                         return
                     except Exception as e:
                         msg = f"⚠️ Agent transcript watcher error (retry in {retry_delay}s): {e}"
-                        print(msg); await push_log(msg)
+                        await push_log(msg)
                         await asyncio.sleep(retry_delay)
                         retry_delay = min(retry_delay * 2, 30.0)
 
@@ -577,7 +577,7 @@ async def join_meeting_and_transcribe(
 
             # Update status when meeting ends
             msg = "Meeting ended — Web Speech API transcription complete"
-            print(msg); await push_log(msg)
+            await push_log(msg)
 
             if mongo_connected:
                 try:
@@ -589,14 +589,14 @@ async def join_meeting_and_transcribe(
                         }}
                     )
                     msg = "✅ Marked as completed in MongoDB"
-                    print(msg); await push_log(msg)
+                    await push_log(msg)
                 except Exception as e:
                     msg = f"⚠️  Failed to update status: {e}"
-                    print(msg); await push_log(msg)
+                    await push_log(msg)
 
         except Exception as e:
             msg = f"❌ Bot error: {e}"
-            print(msg); await push_log(msg)
+            await push_log(msg)
         finally:
             try:
                 await ctx.close()

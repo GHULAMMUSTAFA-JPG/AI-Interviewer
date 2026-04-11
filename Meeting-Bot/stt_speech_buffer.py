@@ -58,21 +58,21 @@ async def _flush_speech_buffer(interview_id: str) -> None:
         )
         if len(words) < 2 and not is_valid_short:
             msg = f"[NOISE FILTERED] Too short ({len(words)} word): \"{current_text}\""
-            print(msg); await push_log(msg)
+            await push_log(msg)
             _speech_buffer = ""
             return
 
         # Dedup: don't save identical text twice in a row
         if current_text == _last_saved_text:
             msg = "[DUPLICATE PREVENTED] Same text as last save -- discarding"
-            print(msg); await push_log(msg)
+            await push_log(msg)
             _speech_buffer = ""
             return
 
         # Save to DB
         await insert_transcript(interview_id, "candidate", current_text)
         msg = f"[SAVED TO DB] \"{current_text[:120]}{'...' if len(current_text) > 120 else ''}\""
-        print(msg); await push_log(msg)
+        await push_log(msg)
 
         _last_saved_text = current_text
         last_speech_time = asyncio.get_event_loop().time()

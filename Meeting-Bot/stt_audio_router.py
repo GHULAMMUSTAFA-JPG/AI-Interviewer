@@ -252,7 +252,7 @@ async def _verify_source_outputs():
             if mv.returncode == 0:
                 fixed += 1
                 msg = f"Moved {label} source-output #{so_idx} from '{src_name}' to {target_source}"
-                print(msg); await push_log(msg)
+                await push_log(msg)
 
         return fixed
     except Exception as e:
@@ -286,17 +286,17 @@ async def create_audio_router():
                 n = await _route_all_sink_inputs_to_virtualsink()
                 if n > 0:
                     msg = f"Audio routing: re-routed {n} sink-input(s) to VirtualSink"
-                    print(msg); await push_log(msg)
+                    await push_log(msg)
 
                 fixed = await _verify_source_outputs()
                 if fixed > 0:
                     msg = f"Audio routing: fixed {fixed} drifted source-output(s)"
-                    print(msg); await push_log(msg)
+                    await push_log(msg)
         except asyncio.CancelledError:
             pass
         except Exception as e:
             msg = f"Audio routing maintenance error: {e}"
-            print(msg); await push_log(msg)
+            await push_log(msg)
 
     return asyncio.create_task(_maintain_audio_routing())
 
@@ -314,7 +314,7 @@ async def setup_audio_routing_after_admission(page=None):
     # Step 1: Route Chrome WebRTC output -> VirtualSink
     n = await _route_all_sink_inputs_to_virtualsink()
     msg = f"Audio routing: moved {n} sink input(s) to VirtualSink"
-    print(msg); await push_log(msg)
+    await push_log(msg)
 
     # Step 2: Switch default source -> BotMic (only affects NEW streams)
     # The Web Speech API recognition is injected AFTER this function,
@@ -327,13 +327,13 @@ async def setup_audio_routing_after_admission(page=None):
         )
         await result.communicate()
         msg = "Switched default source to BotMic (for STT only)"
-        print(msg); await push_log(msg)
+        await push_log(msg)
     except Exception as e:
         msg = f"Failed to switch to BotMic: {e}"
-        print(msg); await push_log(msg)
+        await push_log(msg)
 
     # Step 3: Verify Chrome's mic source-output is on virtual_mic_source
     fixed = await _verify_source_outputs()
     if fixed > 0:
         msg = f"Fixed {fixed} Chrome source-output(s) to virtual_mic_source"
-        print(msg); await push_log(msg)
+        await push_log(msg)

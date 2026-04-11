@@ -39,11 +39,11 @@ async def create_echo_guard_watcher(db, interview_id: str, status_state: dict,
             redis_ok = True
         except Exception as e:
             msg = f"Redis echo guard unavailable: {e} — using MongoDB fallback"
-            print(msg); await push_log(msg)
+            await push_log(msg)
 
         if redis_ok:
             msg = "Echo guard: Redis primary active"
-            print(msg); await push_log(msg)
+            await push_log(msg)
             try:
                 await _watch_tts_status_redis(interview_id, status_state, page)
                 return  # clean shutdown
@@ -51,22 +51,22 @@ async def create_echo_guard_watcher(db, interview_id: str, status_state: dict,
                 return
             except Exception as e:
                 msg = f"Redis echo guard crashed: {e} — activating MongoDB fallback"
-                print(msg); await push_log(msg)
+                await push_log(msg)
 
         # Redis unavailable or crashed — MongoDB fallback
         if mongo_connected and db is not None:
             msg = "Echo guard: MongoDB fallback active"
-            print(msg); await push_log(msg)
+            await push_log(msg)
             try:
                 await _watch_bot_speaking_mongo(db, interview_id, status_state, page)
             except asyncio.CancelledError:
                 return
             except Exception as e:
                 msg = f"MongoDB echo guard failed: {e}"
-                print(msg); await push_log(msg)
+                await push_log(msg)
         else:
             msg = "Echo guard skipped — no Redis or MongoDB available"
-            print(msg); await push_log(msg)
+            await push_log(msg)
 
     return asyncio.create_task(_run())
 
@@ -92,7 +92,7 @@ async def _watch_tts_status_redis(interview_id: str, status_state: dict, page):
 
             retry_delay = 1.0
             msg = f"Echo guard: subscribed to Redis channel {channel}"
-            print(msg); await push_log(msg)
+            await push_log(msg)
 
             async for message in pubsub.listen():
                 if message["type"] != "message":
@@ -109,7 +109,7 @@ async def _watch_tts_status_redis(interview_id: str, status_state: dict, page):
 
                     if is_speaking:
                         msg = "Bot speaking (Redis) — delaying buffer clear + gating STT"
-                        print(msg); await push_log(msg)
+                        await push_log(msg)
 
                         # Delay matches interrupt_handler block window (500ms).
                         # Candidate words spoken just before the bot starts are
@@ -122,28 +122,28 @@ async def _watch_tts_status_redis(interview_id: str, status_state: dict, page):
                             await page.evaluate("window.__tts_started()")
                         except Exception as eval_err:
                             msg = f"__tts_started eval error: {eval_err}"
-                            print(msg); await push_log(msg)
+                            await push_log(msg)
                     else:
                         was_interrupted = data.get("interrupted", False)
                         gate_label = "no echo gate (interrupted)" if was_interrupted else "echo gate active"
                         msg = f"Bot done speaking (Redis) — resuming STT ({gate_label})"
-                        print(msg); await push_log(msg)
+                        await push_log(msg)
                         try:
                             js_flag = "true" if was_interrupted else "false"
                             await page.evaluate(f"window.__tts_ended({js_flag})")
                         except Exception as eval_err:
                             msg = f"__tts_ended eval error: {eval_err}"
-                            print(msg); await push_log(msg)
+                            await push_log(msg)
 
                 except (json.JSONDecodeError, KeyError) as parse_err:
                     msg = f"Redis message parse error: {parse_err}"
-                    print(msg); await push_log(msg)
+                    await push_log(msg)
 
         except asyncio.CancelledError:
             return
         except Exception as e:
             msg = f"Redis echo guard error (retry in {retry_delay}s): {e}"
-            print(msg); await push_log(msg)
+            await push_log(msg)
             await asyncio.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, 30.0)
 
@@ -166,7 +166,7 @@ async def _watch_bot_speaking_mongo(db, interview_id: str, status_state: dict, p
     while True:
         try:
             msg = "Echo guard (MongoDB fallback): change stream opened"
-            print(msg); await push_log(msg)
+            await push_log(msg)
             async with db.interviews.watch(pipeline, full_document="updateLookup") as stream:
                 retry_delay = 1.0
                 async for change in stream:
@@ -181,7 +181,7 @@ async def _watch_bot_speaking_mongo(db, interview_id: str, status_state: dict, p
 
                         if is_speaking:
                             msg = "Bot speaking (MongoDB fallback) — delaying buffer clear + gating STT"
-                            print(msg); await push_log(msg)
+                            await push_log(msg)
 
                             # Same delay as Redis path for consistency
                             await asyncio.sleep(_BUFFER_CLEAR_DELAY_SEC)
@@ -192,25 +192,25 @@ async def _watch_bot_speaking_mongo(db, interview_id: str, status_state: dict, p
                                 await page.evaluate("window.__tts_started()")
                             except Exception as eval_err:
                                 msg = f"__tts_started eval error: {eval_err}"
-                                print(msg); await push_log(msg)
+                                await push_log(msg)
                         else:
                             was_interrupted = bool(full_doc.get("tts_interrupt", False))
                             gate_label = "no echo gate (interrupted)" if was_interrupted else "echo gate active"
                             msg = f"Bot done speaking (MongoDB fallback) — resuming STT ({gate_label})"
-                            print(msg); await push_log(msg)
+                            await push_log(msg)
                             try:
                                 js_flag = "true" if was_interrupted else "false"
                                 await page.evaluate(f"window.__tts_ended({js_flag})")
                             except Exception as eval_err:
                                 msg = f"__tts_ended eval error: {eval_err}"
-                                print(msg); await push_log(msg)
+                                await push_log(msg)
                     except Exception as inner_err:
                         msg = f"MongoDB echo watcher inner error: {inner_err}"
-                        print(msg); await push_log(msg)
+                        await push_log(msg)
         except asyncio.CancelledError:
             return
         except Exception as e:
             msg = f"MongoDB echo guard error (retry in {retry_delay}s): {e}"
-            print(msg); await push_log(msg)
+            await push_log(msg)
             await asyncio.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, 30.0)

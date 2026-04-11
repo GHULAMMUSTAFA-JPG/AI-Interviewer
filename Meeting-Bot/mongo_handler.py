@@ -28,15 +28,15 @@ async def connect_to_mongo() -> bool:
         await client.admin.command("ping")
         db = client[DB_NAME]
         msg = f"Connected to MongoDB ({DB_NAME})"
-        print(msg); await push_log(msg)
+        await push_log(msg)
         return True
     except ServerSelectionTimeoutError:
         msg = "MongoDB connection failed: server not reachable"
-        print(msg); await push_log(msg)
+        await push_log(msg)
         return False
     except Exception as e:
         msg = f"MongoDB connection error: {e}"
-        print(msg); await push_log(msg)
+        await push_log(msg)
         return False
 
 
@@ -48,10 +48,10 @@ async def disconnect_from_mongo() -> None:
             client = None
             db = None
             msg = "MongoDB connection closed"
-            print(msg); await push_log(msg)
+            await push_log(msg)
     except Exception as e:
         msg = f"MongoDB disconnect error: {e}"
-        print(msg); await push_log(msg)
+        await push_log(msg)
 
 
 def get_db():
@@ -100,15 +100,15 @@ async def insert_transcript(interview_id: str, speaker: str, text: str) -> bool:
         try:
             result = await db["transcripts"].insert_one(doc)
             msg = f"Transcript inserted (id={result.inserted_id})"
-            print(msg); await push_log(msg)
+            await push_log(msg)
             return True
         except Exception as e:
             if attempt == 3:
                 msg = f"Transcript insert FAILED after 3 attempts: {e}"
-                print(msg); await push_log(msg)
+                await push_log(msg)
                 return False
             msg = f"Transcript insert error (attempt {attempt}/3), retrying in 1s: {e}"
-            print(msg); await push_log(msg)
+            await push_log(msg)
             await _asyncio.sleep(1)
 
     return False
