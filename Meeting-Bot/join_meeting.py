@@ -24,7 +24,7 @@ from state_manager import set_bot_state
 from meeting_watcher import watch_for_leave
 from stt_speech_buffer import (
     init_speech_state, _flush_speech_buffer, get_speech_buffer,
-    clear_speech_buffer, get_last_speech_time
+    clear_speech_buffer, reset_session, cancel_pending_flush, get_last_speech_time
 )
 from stt_console_handler import create_console_handler
 from stt_echo_guard import create_echo_guard_watcher
@@ -57,7 +57,7 @@ async def join_meeting_and_transcribe(
         9. When meeting ends: insert ONE final transcript
     """
     init_speech_state()  # Reset speech state
-    clear_speech_buffer()
+    reset_session()
 
     temp_dir = tempfile.mkdtemp(prefix="meet_bot_")
     session_id = interview_id or datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -427,6 +427,50 @@ async def join_meeting_and_transcribe(
 
             stt_health_task = asyncio.create_task(_monitor_stt_health())
 
+            async def _monitor_pulseaudio_health():
+                """Check PulseAudio is alive every 30s. Attempt restart if it crashes."""
+                try:
+                    while True:
+                        await asyncio.sleep(30)
+                        try:
+                            proc = await asyncio.create_subprocess_exec(
+                                "pactl", "info",
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE,
+                            )
+                            _, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+                            if proc.returncode != 0:
+                                raise RuntimeError(f"pactl info returned {proc.returncode}")
+                        except Exception as pa_err:
+                            msg = f"PulseAudio health check FAILED: {pa_err} — attempting restart"
+                            print(msg); await push_log(msg)
+                            try:
+                                from redis_client import get_redis, RedisState
+                                redis = await get_redis()
+                                state = RedisState(redis)
+                                await state.set_bot_status(interview_id, "audio_error")
+                            except Exception:
+                                pass
+                            try:
+                                restart = await asyncio.create_subprocess_exec(
+                                    "pulseaudio", "--start",
+                                    stdout=asyncio.subprocess.PIPE,
+                                    stderr=asyncio.subprocess.PIPE,
+                                )
+                                await asyncio.wait_for(restart.communicate(), timeout=10)
+                                msg = "PulseAudio restart attempted"
+                                print(msg); await push_log(msg)
+                            except Exception as restart_err:
+                                msg = f"PulseAudio restart failed: {restart_err}"
+                                print(msg); await push_log(msg)
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    msg = f"PulseAudio monitor error: {e}"
+                    print(msg); await push_log(msg)
+
+            pa_health_task = asyncio.create_task(_monitor_pulseaudio_health())
+
             # Watch bot_speaking flag for echo cancellation
             speaking_watcher_task = await create_echo_guard_watcher(
                 db, interview_id, status_state, page, mongo_connected
@@ -523,7 +567,7 @@ async def join_meeting_and_transcribe(
 
             # Cancel all background tasks
             for task in [heartbeat_task, audio_routing_task, stt_health_task,
-                         speaking_watcher_task, agent_transcript_task, inactivity_task]:
+                         pa_health_task, speaking_watcher_task, agent_transcript_task, inactivity_task]:
                 if task and not task.done():
                     task.cancel()
                     try:
@@ -558,6 +602,7 @@ async def join_meeting_and_transcribe(
                 await ctx.close()
             except Exception:
                 pass
+            cancel_pending_flush()
             if mongo_connected:
                 await disconnect_from_mongo()
 
