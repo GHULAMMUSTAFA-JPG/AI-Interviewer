@@ -15,7 +15,9 @@ build/
 .venv/
 venv/
 ENV/
-env/
+env/'
+.env
+.env.docker
 .eggs/
 
 # ── Environment & secrets ─────────────────────────────────────────

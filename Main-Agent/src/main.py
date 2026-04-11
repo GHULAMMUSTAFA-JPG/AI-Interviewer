@@ -206,12 +206,14 @@ async def _watch_new_interviews(db, shutdown_event: asyncio.Event) -> None:
                         logger.info(f"[GREETING] Already sent for {interview_id} — skipping duplicate")
                         continue
 
-                    # Wait 5 seconds after bot admission for audio to stabilize.
-                    # The bot takes ~2-5s after admission to: set up PulseAudio routing,
-                    # inject Web Speech API, and establish its WebRTC audio stream to the
-                    # meeting. This ensures the TTS greeting is actually heard by the candidate.
-                    logger.info(f"[GREETING] Waiting 5 seconds for bot audio to stabilize...")
-                    await asyncio.sleep(5)
+                    # Wait 10 seconds after bot admission for audio to stabilize.
+                    # The bot takes ~5-8s after admission to: set up PulseAudio routing,
+                    # inject Web Speech API, establish its WebRTC audio stream to the
+                    # meeting, and stabilize volume levels. If we insert the greeting
+                    # too early, the TTS audio plays through virtual_mic but Chrome
+                    # isn't capturing it yet → nobody hears it.
+                    logger.info(f"[GREETING] Waiting 10 seconds for bot audio to stabilize...")
+                    await asyncio.sleep(10)
 
                     try:
                         await db.transcripts.insert_one({

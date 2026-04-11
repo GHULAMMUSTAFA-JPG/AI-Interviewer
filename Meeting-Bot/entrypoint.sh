@@ -83,6 +83,10 @@ fi
 # Boost VirtualSink output volume so TTS audio is clearly audible
 pactl set-sink-volume VirtualSink 150% && log "✅ VirtualSink volume set to 150%" || log "⚠️  Could not set VirtualSink volume"
 
+# Boost virtual_mic volume so bot's TTS voice reaches Google Meet clearly
+pactl set-sink-volume virtual_mic 150% && log "✅ virtual_mic volume set to 150%" || log "⚠️  Could not set virtual_mic volume"
+pactl set-source-volume virtual_mic_source 150% && log "✅ virtual_mic_source volume set to 150%" || log "⚠️  Could not set virtual_mic_source volume"
+
 # NOTE: TTS audio now plays directly to virtual_mic sink (not VirtualSink).
 # This sends bot's voice to Chrome's microphone input for Google Meet,
 # while keeping VirtualSink clean for STT echo monitoring.
