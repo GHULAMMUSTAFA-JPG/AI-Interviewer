@@ -22,6 +22,20 @@ SPEECH_INJECTION_SCRIPT = """
         return { isRunning, restartBackoff, interviewActive, isBotSpeaking };
     };
 
+    // Python watchdog calls this when it detects isRunning=false for too long
+    window.__stt_restart = function() {
+        if (!interviewActive) return;
+        restartBackoff = 1500;  // reset backoff before forcing restart
+        if (recognition && isRunning) {
+            // Already running — stop it, onend will schedule a fresh start
+            recognition.stop();
+        } else if (!isRunning) {
+            // Stalled — force a new session immediately
+            scheduleRestart(300);
+        }
+        emit("STT_FORCE_RESTARTED:");
+    };
+
     // ─── Two-phase interrupt state ───────────────────────────────
     // onspeechstart alone is not enough — background noise and room sounds
     // trigger it constantly. We wait for onresult to confirm real speech before
@@ -82,15 +96,13 @@ SPEECH_INJECTION_SCRIPT = """
     window.__tts_ended = function(wasInterrupted) {
         isBotSpeaking = false;
         _clearInterruptState();
-        // Interrupt: candidate's speech stopped the bot — skip echo gate so those
-        //            interrupting words are captured immediately.
-        // Natural end: Google STT queue still has 1-2s of bot audio in flight —
-        //              run the full echo gate so it doesn't contaminate the transcript.
-        botStoppedAt = wasInterrupted ? Date.now() - ECHO_GATE_MS : Date.now();
+        // Echo gate: Google STT queue still has 1-2s of bot audio in flight —
+        // always run the full echo gate regardless of interrupt, to prevent
+        // the bot's own voice from leaking through as candidate speech.
+        botStoppedAt = Date.now();
 
-        // CRITICAL: On interrupt, the candidate is still speaking — their words
-        // are accumulating in `transcript`. Don't clear it or we lose their speech.
         // On natural end, clear everything for a fresh start.
+        // On interrupt, candidate's speech is accumulating in transcript — keep it.
         if (!wasInterrupted) {
             _clearTimers();
             transcript = "";

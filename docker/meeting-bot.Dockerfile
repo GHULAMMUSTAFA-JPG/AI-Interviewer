@@ -1,9 +1,18 @@
 # ════════════════════════════════════════════════════════════════════════════════
 # Meeting-Bot — Headless Chrome + PulseAudio + Persistent Profile
-# VNC enabled for debugging - connect to localhost:5900 (password: meetingbot123)
+#
+# Build args:
+#   BUILD_ENV=dev  (default) — includes VNC + noVNC for remote desktop debugging
+#   BUILD_ENV=prod           — no VNC, smaller image (~120 MB saved)
+#
+# Usage:
+#   docker compose up --build                           # dev (VNC on :5900/:6080)
+#   docker build --build-arg BUILD_ENV=prod ...         # prod, no VNC
 # ════════════════════════════════════════════════════════════════════════════════
 
 FROM ubuntu:22.04
+
+ARG BUILD_ENV=dev
 
 # ════════════════════════════════════════════════════════════════════════════════
 # Base Configuration
@@ -60,23 +69,25 @@ RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add
 RUN google-chrome --version
 
 # ════════════════════════════════════════════════════════════════════════════════
-# Xvfb + VNC — Virtual display with remote desktop access for debugging
+# Xvfb — Virtual display (always required for headless Chrome)
+# VNC + noVNC — debug tooling, included only when BUILD_ENV=dev
 # ════════════════════════════════════════════════════════════════════════════════
 
+# Always: Xvfb + fonts for headless Chrome
 RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb \
     x11-utils \
     fonts-liberation \
     fonts-noto-color-emoji \
-    \
-    # VNC Server for remote desktop access
-    x11vnc \
-    \
-    # noVNC for web-based VNC viewer (accessible via browser)
-    novnc \
-    \
-    # Cleanup
     && rm -rf /var/lib/apt/lists/*
+
+# Dev-only: VNC server + noVNC web viewer for remote desktop debugging
+RUN if [ "$BUILD_ENV" = "dev" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            x11vnc \
+            novnc \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 # ════════════════════════════════════════════════════════════════════════════════
 # PulseAudio — Virtual Audio Sink for TTS

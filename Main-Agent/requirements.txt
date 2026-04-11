@@ -1,26 +1,12 @@
-anthropic>=0.40.0           # Anthropic Claude SDK
-
-# Core dependencies
-motor>=3.6.0                # Async MongoDB driver
-pydantic>=2.10.0            # Data validation
-python-dotenv>=1.0.0        # Environment variables
-
-# Performance Optimization Dependencies
-google-genai>=1.0.0         # New Gemini SDK (30-50% faster than old SDK)
-orjson>=3.10.0              # Fast JSON parsing (5-10x faster)
-cachetools>=5.5.0           # In-memory caching
-tenacity>=9.0.0             # Retry logic with exponential backoff
-structlog>=24.4.0           # Structured logging
-
-# Note: uvloop skipped (Windows not supported, Linux/Mac only)
-# Still achieve 60-70% speedup without it!
-
-# Optional: TTS integration (only if you have a TTS service)
-aiohttp>=3.10.0             # Async HTTP client for TTS handoff
-
-# Development dependencies
-pytest>=8.3.0
-pytest-asyncio>=0.24.0
-ruff>=0.8.0
-black>=24.0.0
-redis>=5.0.0 
+anthropic>=0.40.0
+motor>=3.6.0
+pydantic>=2.10.0
+python-dotenv>=1.0.0
+google-genai>=1.0.0
+openai>=1.0.0
+orjson>=3.10.0
+cachetools>=5.5.0
+tenacity>=9.0.0
+structlog>=24.4.0
+aiohttp>=3.10.0
+redis>=5.0.0

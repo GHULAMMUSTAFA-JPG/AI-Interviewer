@@ -21,17 +21,22 @@ log "✅ Xvfb running"
 # Start VNC server for remote desktop access (debugging)
 log "Starting VNC server on port 5900..."
 # Create VNC password file
-x11vnc -storepasswd $VNC_PASSWORD /tmp/vncpass 2>/dev/null
-# Start VNC with password auth
-x11vnc -display :99 -forever -shared -rfbauth /tmp/vncpass -listen 0.0.0.0 -o /var/log/x11vnc.log &
-sleep 1
-log "✅ VNC server running on port 5900 (password: $VNC_PASSWORD)"
+# Start VNC + noVNC only when the tools are installed (BUILD_ENV=dev)
+if command -v x11vnc &>/dev/null; then
+    x11vnc -storepasswd $VNC_PASSWORD /tmp/vncpass 2>/dev/null
+    x11vnc -display :99 -forever -shared -rfbauth /tmp/vncpass -listen 0.0.0.0 -o /var/log/x11vnc.log &
+    sleep 1
+    log "✅ VNC server running on port 5900 (password: $VNC_PASSWORD)"
 
-# Start noVNC web server (web-based VNC viewer - no download needed!)
-log "Starting noVNC web server on port 6080..."
-/app/venv/bin/python -m websockify --web=/usr/share/novnc 6080 localhost:5900 > /var/log/websockify.log 2>&1 &
-sleep 2
-log "✅ noVNC available at http://localhost:6080/vnc.html"
+    if [ -d /usr/share/novnc ]; then
+        log "Starting noVNC web server on port 6080..."
+        /app/venv/bin/python -m websockify --web=/usr/share/novnc 6080 localhost:5900 > /var/log/websockify.log 2>&1 &
+        sleep 2
+        log "✅ noVNC available at http://localhost:6080/vnc.html"
+    fi
+else
+    log "VNC not installed (prod build) — skipping remote desktop"
+fi
 
 # Start PulseAudio - MATCH OTHER PROJECT'S CONFIG
 log "Starting PulseAudio..."

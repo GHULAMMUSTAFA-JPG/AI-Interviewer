@@ -1,10 +1,12 @@
 FROM python:3.11-slim
 
 # ── System deps ────────────────────────────────────────────────────────────────
-# pulseaudio-utils: provides paplay — plays decoded PCM to PulseAudio.
-# mpg123: lightweight MP3 decoder — decodes ElevenLabs MP3 stream to PCM.
-# Together: ElevenLabs MP3 → mpg123 (decode) → paplay (play) → PulseAudio.
-RUN apt-get update && apt-get install -y \
+# pulseaudio-utils : provides pacat — streams raw PCM to PulseAudio virtual_mic.
+# mpg123           : MP3 → PCM decoder used by the Edge TTS path only.
+#                    ElevenLabs outputs pcm_22050 directly so mpg123 is NOT used
+#                    when TTS_PROVIDER=elevenlabs, but it is kept here so the
+#                    image works with both providers without a rebuild.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     pulseaudio-utils \
     mpg123 \
     && rm -rf /var/lib/apt/lists/*

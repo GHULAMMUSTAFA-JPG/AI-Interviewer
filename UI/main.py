@@ -418,35 +418,44 @@ async def view_evaluation(request: Request, interview_id: str = Path(...)):
 @app.get("/api/audio/{file_id}")
 async def serve_audio(file_id: str = Path(...)):
     """Serve audio file from GridFS for playback in the UI."""
-    import gridfs
+    import io
+    import wave
     from bson import ObjectId
     from fastapi.responses import Response
+    from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+
     db = _get_db()
-    fs = gridfs.GridFS(db, collection='audio')
     try:
         oid = ObjectId(file_id)
-        file_doc = db['audio.files'].find_one({"_id": oid})
+
+        # Use Motor's async GridFS — sync gridfs.GridFS cannot accept a Motor database
+        bucket = AsyncIOMotorGridFSBucket(db, bucket_name="audio")
+
+        # Fetch file metadata to determine content type
+        file_doc = await db["audio.files"].find_one({"_id": oid})
         if not file_doc:
             raise HTTPException(status_code=404, detail="Audio not found")
-        data = fs.get(oid).read()
-        # Determine content type - PCM needs WAV wrapper for browser playback
-        filename = file_doc.get('filename', '')
-        if filename.endswith('.mp3'):
-            content_type = 'audio/mpeg'
-        elif filename.endswith('.pcm'):
-            # Wrap PCM in WAV header so browsers can play it
-            import wave
-            import io
+
+        # Download audio bytes asynchronously
+        grid_out = await bucket.open_download_stream(oid)
+        data = await grid_out.read()
+
+        # Determine content type — PCM needs a WAV wrapper for browser playback
+        filename = file_doc.get("filename", "")
+        if filename.endswith(".mp3"):
+            content_type = "audio/mpeg"
+        elif filename.endswith(".pcm"):
             wav_buffer = io.BytesIO()
-            with wave.open(wav_buffer, 'wb') as wf:
+            with wave.open(wav_buffer, "wb") as wf:
                 wf.setnchannels(1)
-                wf.setsampwidth(2)  # 16-bit
+                wf.setsampwidth(2)   # 16-bit
                 wf.setframerate(22050)
                 wf.writeframes(data)
             data = wav_buffer.getvalue()
-            content_type = 'audio/wav'
+            content_type = "audio/wav"
         else:
-            content_type = 'audio/wav'
+            content_type = "audio/wav"
+
         return Response(content=data, media_type=content_type)
     except HTTPException:
         raise

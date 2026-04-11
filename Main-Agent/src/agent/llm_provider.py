@@ -330,6 +330,97 @@ class AnthropicProvider(LLMProvider):
         return await summary_circuit_breaker.call(self._call_anthropic, prompt)
 
 
+class QwenProvider(LLMProvider):
+    """Qwen via OpenRouter free tier — OpenAI-compatible API."""
+
+    def __init__(self):
+        from openai import AsyncOpenAI
+
+        self.client = AsyncOpenAI(
+            api_key=Config.OPENROUTER_API_KEY,
+            base_url="https://openrouter.ai/api/v1",
+        )
+        self.model = Config.QWEN_MODEL
+        logger_struct.info("qwen_provider_initialized", model=self.model)
+
+    async def _call_qwen(self, prompt: str) -> str:
+        """Core Qwen API call — no retry, no circuit breaker."""
+        start_time = time.perf_counter()
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=400,
+                temperature=0.7,
+            )
+            text = response.choices[0].message.content
+            if not text:
+                raise LLMException("Qwen returned empty response")
+            latency_ms = (time.perf_counter() - start_time) * 1000
+            logger_struct.info(
+                "qwen_response_generated",
+                latency_ms=round(latency_ms, 2),
+                response_length=len(text),
+                model=self.model,
+            )
+            return text
+        except LLMException:
+            raise
+        except Exception as e:
+            latency_ms = (time.perf_counter() - start_time) * 1000
+            logger_struct.error(
+                "qwen_generation_failed",
+                error=str(e),
+                error_type=type(e).__name__,
+                latency_ms=round(latency_ms, 2),
+                exc_info=True,
+            )
+            raise LLMException(f"Qwen error: {e}")
+
+    @retry(
+        stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
+        wait=_gemini_wait,
+        retry=retry_if_exception_type(Exception),
+        before_sleep=before_sleep_log(logger_struct, logging.WARNING),
+        reraise=True,
+    )
+    async def generate(self, prompt: str) -> str:
+        return await llm_circuit_breaker.call(self._call_qwen, prompt)
+
+    @retry(
+        stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
+        wait=_gemini_wait,
+        retry=retry_if_exception_type(Exception),
+        before_sleep=before_sleep_log(logger_struct, logging.WARNING),
+        reraise=True,
+    )
+    async def generate_combined(self, prompt: str) -> tuple[str, dict]:
+        """
+        Qwen doesn't support JSON mode natively, so we call generate() and parse.
+        Returns (response_text, empty_metadata).
+        """
+        text = await self._call_qwen(prompt)
+        metadata = {}
+        # Try to extract JSON from the response
+        json_match = re.search(r"\{[^}]*\}", text, re.DOTALL)
+        if json_match:
+            try:
+                metadata = json.loads(json_match.group())
+            except json.JSONDecodeError:
+                pass
+        return text, metadata
+
+    @retry(
+        stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
+        wait=_gemini_wait,
+        retry=retry_if_exception_type(Exception),
+        before_sleep=before_sleep_log(logger_struct, logging.WARNING),
+        reraise=True,
+    )
+    async def generate_summary(self, prompt: str) -> str:
+        return await summary_circuit_breaker.call(self._call_qwen, prompt)
+
+
 # Module-level singleton — created once at first call, reused for every message.
 # This avoids creating a new genai.Client (HTTP session + TLS handshake) on every turn.
 _provider_instance: LLMProvider | None = None
@@ -348,6 +439,8 @@ def get_llm_provider() -> LLMProvider:
             _provider_instance = OpenAIProvider()
         elif provider == "anthropic":
             _provider_instance = AnthropicProvider()
+        elif provider == "qwen":
+            _provider_instance = QwenProvider()
         else:
             raise ValueError(f"Unknown LLM provider: {provider}")
 

@@ -1,7 +1,7 @@
 """pacat audio player for PulseAudio virtual mic.
 
 Audio path:
-  ElevenLabs PCM chunks
+  Edge TTS PCM chunks (via mpg123 MP3 decode)
     → pacat stdin
     → PULSE_SERVER=unix:/var/run/pulse/native  (shared Docker volume → meeting-bot)
     → PulseAudio virtual_mic null-sink          (--device=virtual_mic)
@@ -49,7 +49,7 @@ class AudioPlayer:
             "--format=s16le",
             f"--rate={config.sample_rate}",
             f"--channels={config.channels}",
-            "--latency-msec=50",
+            f"--latency-msec={config.pacat_latency_msec}",
         ]
 
         logger.info(

@@ -1,24 +1,11 @@
-"""TTS Service Configuration"""
+"""TTS Service Configuration — Edge TTS branch (free, no API key)."""
 import os
-from dataclasses import dataclass, field
-from typing import Optional, List
+from dataclasses import dataclass
+from typing import Optional
 
 from dotenv import load_dotenv, find_dotenv
 
 load_dotenv(find_dotenv(usecwd=True))  # searches up to root .env for local dev
-
-
-def _load_elevenlabs_keys() -> List[str]:
-    """Load all ElevenLabs API keys from environment variables."""
-    keys = []
-    # Try ELEVENLABS_API_KEY first
-    if key := os.getenv("ELEVENLABS_API_KEY", "").strip():
-        keys.append(key)
-    # Then try ELEVENLABS_API_KEY1, ELEVENLABS_API_KEY2, ... up to 20
-    for i in range(1, 21):
-        if key := os.getenv(f"ELEVENLABS_API_KEY{i}", "").strip():
-            keys.append(key)
-    return keys
 
 
 @dataclass(frozen=True)
@@ -37,22 +24,12 @@ class Config:
         else None
     )
     pulse_server: str = os.getenv("PULSE_SERVER", "unix:/run/user/1000/pulse/native")
-    virtual_mic: str = os.getenv("VIRTUAL_MIC", "VirtualSink")
+    # TTS audio must play to virtual_mic (not VirtualSink) so it flows:
+    #   virtual_mic → virtual_mic.monitor → virtual_mic_source → Chrome WebRTC mic
+    # Writing to VirtualSink instead would loop bot audio back through BotMic into STT.
+    virtual_mic: str = os.getenv("VIRTUAL_MIC", "virtual_mic")
 
-    # ElevenLabs - Support multiple API keys with fallback
-    elevenlabs_api_keys: List[str] = field(default_factory=_load_elevenlabs_keys)
-    elevenlabs_voice_id: str = os.getenv(
-        "ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"
-    )
-    elevenlabs_model_id: str = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
-    elevenlabs_output_format: str = os.getenv(
-        "ELEVENLABS_OUTPUT_FORMAT", "pcm_22050"
-    )
-    elevenlabs_base_url: str = "https://api.elevenlabs.io"
-    elevenlabs_connect_timeout: float = 10.0  # seconds
-
-    # Edge TTS (Microsoft) — free, no API key
-    tts_provider: str = os.getenv("TTS_PROVIDER", "edge").lower()
+    # Edge TTS (Microsoft) — free, no API key required
     edge_tts_voice: str = os.getenv("EDGE_TTS_VOICE", "en-US-GuyNeural")
 
     # Audio
@@ -60,6 +37,10 @@ class Config:
     channels: int = 1
     dtype: str = "int16"
     chunk_size: int = 4096  # bytes
+
+    # PulseAudio player buffer — 30 ms is the sweet spot: low enough for snappy
+    # interruption, high enough that pacat never underruns on a loaded system.
+    pacat_latency_msec: int = int(os.getenv("PACAT_LATENCY_MSEC", "30"))
 
     # Performance
     interruption_latency_ms: int = 50

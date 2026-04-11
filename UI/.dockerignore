@@ -1,0 +1,32 @@
+# Version control
+.git
+.gitignore
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.egg-info
+.eggs
+
+# Tests
+tests/
+test_*.py
+*_test.py
+.pytest_cache
+
+# Local dev / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Docs
+*.md

@@ -327,7 +327,7 @@ async def join_meeting_and_transcribe(
 
             # Route Chrome output → VirtualSink, switch default source → BotMic,
             # verify Chrome mic source-output is on virtual_mic_source
-            await setup_audio_routing_after_admission()
+            await setup_audio_routing_after_admission(page)
 
             # Inject Web Speech API → uses BotMic (new default source)
             msg = "🎤 Injecting Web Speech API..."
@@ -373,22 +373,45 @@ async def join_meeting_and_transcribe(
             # Periodic audio routing maintenance
             audio_routing_task = await create_audio_router()
 
-            # STT health monitoring — verify recognition is actually active
+            # STT health monitoring — verify recognition is active, auto-restart if stalled
             async def _monitor_stt_health():
-                """Check every 10s that Web Speech API is still functioning."""
+                """
+                Check every 10s that Web Speech API is running.
+                After 3 consecutive not-running checks (30s stalled), force-restart
+                by calling window.__stt_restart() from Python.
+                """
+                not_running_streak = 0
                 try:
                     while True:
                         await asyncio.sleep(10)
                         try:
                             health = await page.evaluate("() => window.__stt_health()")
                             if health:
-                                msg = (f"🎤 STT health: running={health.get('isRunning')}, "
+                                is_running = health.get('isRunning', False)
+                                is_active  = health.get('interviewActive', True)
+                                msg = (f"🎤 STT health: running={is_running}, "
                                        f"backoff={health.get('restartBackoff')}ms, "
-                                       f"active={health.get('interviewActive')}, "
+                                       f"active={is_active}, "
                                        f"bot_speaking={health.get('isBotSpeaking')}")
+                                print(msg); await push_log(msg)
+
+                                if not is_running and is_active:
+                                    not_running_streak += 1
+                                    if not_running_streak >= 3:
+                                        # STT stalled for 30s — force restart
+                                        msg = f"⚠️  STT stalled {not_running_streak * 10}s — force-restarting"
+                                        print(msg); await push_log(msg)
+                                        try:
+                                            await page.evaluate("window.__stt_restart()")
+                                            not_running_streak = 0
+                                        except Exception as restart_err:
+                                            msg = f"⚠️  STT force-restart failed: {restart_err}"
+                                            print(msg); await push_log(msg)
+                                else:
+                                    not_running_streak = 0
                             else:
-                                msg = f"🎤 STT health: no data (page may be closed)"
-                            print(msg); await push_log(msg)
+                                msg = "🎤 STT health: no data (page may be closed)"
+                                print(msg); await push_log(msg)
                         except Exception as stt_err:
                             msg = f"⚠️  STT health check failed: {stt_err}"
                             print(msg)
@@ -491,7 +514,8 @@ async def join_meeting_and_transcribe(
                 pass
 
             # Cancel all background tasks
-            for task in [heartbeat_task, speaking_watcher_task, agent_transcript_task, inactivity_task]:
+            for task in [heartbeat_task, audio_routing_task, stt_health_task,
+                         speaking_watcher_task, agent_transcript_task, inactivity_task]:
                 if task and not task.done():
                     task.cancel()
                     try:

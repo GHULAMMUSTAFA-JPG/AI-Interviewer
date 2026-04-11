@@ -136,6 +136,10 @@ class Config:
     ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
     ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4")
 
+    # Qwen (via OpenRouter free tier)
+    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+    QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen/qwen-2.5-coder-32b-instruct:free")
+
     # TTS Service
     TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL", "http://localhost:8080/synthesize")
 
@@ -166,6 +170,9 @@ class Config:
 
         if cls.LLM_PROVIDER == "anthropic" and not cls.ANTHROPIC_API_KEY:
             errors.append("ANTHROPIC_API_KEY is required when using Anthropic provider")
+
+        if cls.LLM_PROVIDER == "qwen" and not cls.OPENROUTER_API_KEY:
+            errors.append("OPENROUTER_API_KEY is required when using Qwen provider")
 
         if errors:
             raise ValueError(f"Configuration errors: {', '.join(errors)}")

@@ -102,6 +102,9 @@ class InterruptHandler:
         Fires when tts_interrupt becomes True on the given interview.
         Sets stop_event so AudioPlayer stops mid-stream.
         Blocks interrupts for first 500ms to let bot complete first 2-3 words.
+
+        Reconnects on transient MongoDB errors — a single exception must NOT
+        permanently disable interruptions for the rest of the audio session.
         """
         pipeline = [
             {
@@ -111,33 +114,42 @@ class InterruptHandler:
                 }
             }
         ]
-        try:
-            async with self.db.interviews.watch(
-                pipeline, full_document="updateLookup"
-            ) as stream:
-                async for change in stream:
-                    full_doc = change.get("fullDocument") or {}
-                    if full_doc.get("interview_id") == interview_id:
-                        elapsed = asyncio.get_event_loop().time() - self._armed_at
-                        
-                        # Check if we're still in the block window
-                        if elapsed < INTERRUPT_BLOCK_WINDOW_SEC:
-                            logger.debug(f"Interrupt blocked (first {INTERRUPT_BLOCK_WINDOW_SEC}s): interview={interview_id}")
-                            await asyncio.sleep(INTERRUPT_BLOCK_WINDOW_SEC - elapsed)
-                        
-                        # Add small delay to ensure bot audio actually started
-                        if elapsed < 0.3:
-                            await asyncio.sleep(0.3 - elapsed)
-                            
-                        logger.info(
-                            f"Interrupt received: interview={interview_id} — stopping audio"
-                        )
-                        self._stop_event.set()
-                        return  # One interrupt per utterance is enough
-        except asyncio.CancelledError:
-            pass  # Normal — disarm() cancelled the task after audio finished
-        except Exception as exc:
-            logger.error(f"Interrupt watch error: {exc}")
+        retry_delay = 0.5
+        while True:
+            try:
+                async with self.db.interviews.watch(
+                    pipeline, full_document="updateLookup"
+                ) as stream:
+                    retry_delay = 0.5  # reset on successful open
+                    async for change in stream:
+                        full_doc = change.get("fullDocument") or {}
+                        if full_doc.get("interview_id") == interview_id:
+                            elapsed = asyncio.get_event_loop().time() - self._armed_at
+
+                            # Honour the block window so bot speaks at least 2-3 words
+                            if elapsed < INTERRUPT_BLOCK_WINDOW_SEC:
+                                logger.debug(
+                                    f"Interrupt blocked (first {INTERRUPT_BLOCK_WINDOW_SEC}s): "
+                                    f"interview={interview_id}"
+                                )
+                                await asyncio.sleep(INTERRUPT_BLOCK_WINDOW_SEC - elapsed)
+
+                            logger.info(
+                                f"Interrupt received: interview={interview_id} — stopping audio"
+                            )
+                            self._stop_event.set()
+                            return  # One interrupt per utterance — done
+            except asyncio.CancelledError:
+                return  # Normal — disarm() cancelled after audio finished
+            except Exception as exc:
+                if self._stop_event.is_set():
+                    # Audio already finished/interrupted — no need to reconnect
+                    return
+                logger.warning(
+                    f"Interrupt watch error (retry in {retry_delay:.1f}s): {exc}"
+                )
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 10.0)
 
     async def close(self) -> None:
         """Cancel any running watch task on service shutdown."""
