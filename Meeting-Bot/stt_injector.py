@@ -44,12 +44,12 @@ SPEECH_INJECTION_SCRIPT = """
     let interruptConfirmed    = false; // interrupt already sent this bot turn
 
     // ─── Constants ───────────────────────────────────────────────
-    const SILENCE_MS           = 2500;  // ms of silence after last confirmed word → save (candidates pause mid-thought)
+    const SILENCE_MS           = 4500;  // ms of silence after last confirmed word → save (candidates pause mid-thought)
     const ECHO_GATE_MS         = 700;   // ms to ignore STT after bot stops (Google STT queue drains in ~300-500ms)
     const MAX_SPEECH_MS        = 45000; // ms — force-save when onspeechend never fires (technical answers exceed 25s)
     const MIN_CONFIDENCE       = 0.55;  // discard finals below this; 0 = not reported → keep
     const MIN_WORDS            = 2;     // discard saves shorter than this (noise artifacts)
-    const INTERRUPT_CONFIRM_MS = 1000;  // ms window to confirm interrupt via onresult
+    const INTERRUPT_CONFIRM_MS = 2000;  // ms window to confirm interrupt via onresult
     const MIN_INTERRUPT_WORDS  = 1;     // words required in onresult to confirm real interruption
     const MAX_RESTART_BACKOFF  = 4000;  // ms — max backoff cap for recognition restarts (was 16000)
 

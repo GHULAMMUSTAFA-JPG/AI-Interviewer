@@ -121,6 +121,28 @@ class InterruptHandler:
                     pipeline, full_document="updateLookup"
                 ) as stream:
                     retry_delay = 0.5  # reset on successful open
+
+                    # Post-open check: catch any tts_interrupt=True written in the
+                    # gap between arm()'s tts_interrupt=False clear and stream open.
+                    # Without this, an interrupt that lands in that window is silently
+                    # missed and the bot plays through without stopping.
+                    try:
+                        current = await self.db.interviews.find_one(
+                            {"interview_id": interview_id},
+                            projection={"tts_interrupt": 1},
+                        )
+                        if current and current.get("tts_interrupt"):
+                            elapsed = asyncio.get_event_loop().time() - self._armed_at
+                            if elapsed < INTERRUPT_BLOCK_WINDOW_SEC:
+                                await asyncio.sleep(INTERRUPT_BLOCK_WINDOW_SEC - elapsed)
+                            logger.info(
+                                f"Interrupt caught via post-open check: interview={interview_id}"
+                            )
+                            self._stop_event.set()
+                            return
+                    except Exception as check_err:
+                        logger.warning(f"Post-open interrupt check failed (continuing): {check_err}")
+
                     async for change in stream:
                         full_doc = change.get("fullDocument") or {}
                         if full_doc.get("interview_id") == interview_id:

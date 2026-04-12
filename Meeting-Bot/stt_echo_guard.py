@@ -22,6 +22,24 @@ from logger import push_log
 _BUFFER_CLEAR_DELAY_SEC = 0.5
 
 
+async def _safe_evaluate(page, expr: str, label: str, max_attempts: int = 3) -> bool:
+    """
+    Call page.evaluate() with retry.
+    A single JS context error should not permanently disable echo protection.
+    Returns True on success, False if all attempts fail.
+    """
+    for attempt in range(max_attempts):
+        try:
+            await page.evaluate(expr)
+            return True
+        except Exception as e:
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(0.2)
+            else:
+                await push_log(f"{label} eval failed after {max_attempts} attempts: {e}")
+    return False
+
+
 async def create_echo_guard_watcher(db, interview_id: str, status_state: dict,
                                      page, mongo_connected: bool = False):
     """
@@ -94,6 +112,27 @@ async def _watch_tts_status_redis(interview_id: str, status_state: dict, page):
             msg = f"Echo guard: subscribed to Redis channel {channel}"
             await push_log(msg)
 
+            # Startup state sync: read current TTS status from Redis hash before
+            # listening for pub/sub events. Without this, if TTS was already speaking
+            # when we subscribed (or after a reconnect), we'd miss the "speaking" event
+            # and JS would never gate STT — bot's own voice leaks through as candidate speech.
+            try:
+                current_status = await redis.hget(f"tts:{interview_id}:status", "status")
+                if current_status:
+                    current_is_speaking = current_status.decode() == "speaking"
+                    if current_is_speaking != status_state.get("bot_speaking", False):
+                        status_state["bot_speaking"] = current_is_speaking
+                        if current_is_speaking:
+                            from stt_speech_buffer import clear_speech_buffer
+                            clear_speech_buffer()
+                            await _safe_evaluate(page, "window.__tts_started()", "__tts_started (startup sync)")
+                            await push_log("Echo guard: startup sync — bot was already speaking")
+                        else:
+                            await _safe_evaluate(page, "window.__tts_ended(false)", "__tts_ended (startup sync)")
+                            await push_log("Echo guard: startup sync — bot was idle")
+            except Exception as sync_err:
+                await push_log(f"Echo guard startup sync failed (non-fatal): {sync_err}")
+
             async for message in pubsub.listen():
                 if message["type"] != "message":
                     continue
@@ -118,22 +157,14 @@ async def _watch_tts_status_redis(interview_id: str, status_state: dict, page):
 
                         from stt_speech_buffer import clear_speech_buffer
                         clear_speech_buffer()
-                        try:
-                            await page.evaluate("window.__tts_started()")
-                        except Exception as eval_err:
-                            msg = f"__tts_started eval error: {eval_err}"
-                            await push_log(msg)
+                        await _safe_evaluate(page, "window.__tts_started()", "__tts_started")
                     else:
                         was_interrupted = data.get("interrupted", False)
                         gate_label = "no echo gate (interrupted)" if was_interrupted else "echo gate active"
                         msg = f"Bot done speaking (Redis) — resuming STT ({gate_label})"
                         await push_log(msg)
-                        try:
-                            js_flag = "true" if was_interrupted else "false"
-                            await page.evaluate(f"window.__tts_ended({js_flag})")
-                        except Exception as eval_err:
-                            msg = f"__tts_ended eval error: {eval_err}"
-                            await push_log(msg)
+                        js_flag = "true" if was_interrupted else "false"
+                        await _safe_evaluate(page, f"window.__tts_ended({js_flag})", "__tts_ended")
 
                 except (json.JSONDecodeError, KeyError) as parse_err:
                     msg = f"Redis message parse error: {parse_err}"
@@ -188,22 +219,16 @@ async def _watch_bot_speaking_mongo(db, interview_id: str, status_state: dict, p
 
                             from stt_speech_buffer import clear_speech_buffer
                             clear_speech_buffer()
-                            try:
-                                await page.evaluate("window.__tts_started()")
-                            except Exception as eval_err:
-                                msg = f"__tts_started eval error: {eval_err}"
-                                await push_log(msg)
+                            await _safe_evaluate(page, "window.__tts_started()", "__tts_started (MongoDB fallback)")
                         else:
-                            was_interrupted = bool(full_doc.get("tts_interrupt", False))
-                            gate_label = "no echo gate (interrupted)" if was_interrupted else "echo gate active"
-                            msg = f"Bot done speaking (MongoDB fallback) — resuming STT ({gate_label})"
+                            # Always pass wasInterrupted=false on the MongoDB fallback path.
+                            # Reading tts_interrupt from the document is unreliable — the flag
+                            # may be stale from a previous turn since disarm() does not clear it.
+                            # Passing false is the safe default: echo gate runs, no candidate words
+                            # are lost (candidate would need to wait the echo gate period, ~700ms).
+                            msg = "Bot done speaking (MongoDB fallback) — resuming STT (echo gate active)"
                             await push_log(msg)
-                            try:
-                                js_flag = "true" if was_interrupted else "false"
-                                await page.evaluate(f"window.__tts_ended({js_flag})")
-                            except Exception as eval_err:
-                                msg = f"__tts_ended eval error: {eval_err}"
-                                await push_log(msg)
+                            await _safe_evaluate(page, "window.__tts_ended(false)", "__tts_ended (MongoDB fallback)")
                     except Exception as inner_err:
                         msg = f"MongoDB echo watcher inner error: {inner_err}"
                         await push_log(msg)

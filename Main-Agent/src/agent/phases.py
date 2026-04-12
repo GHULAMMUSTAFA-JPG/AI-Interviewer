@@ -12,7 +12,7 @@ PhaseType = Literal["INTRO", "EXPERIENCE", "TECHNICAL", "BEHAVIORAL", "CLOSING"]
 PHASE_CONFIG = {
     "INTRO": {
         "min_turns": 2,
-        "max_turns": 5,
+        "max_turns": 3,
         "next_phase": "EXPERIENCE",
         "objective": "Build rapport and explain the interview format"
     },

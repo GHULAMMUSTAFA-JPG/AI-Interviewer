@@ -35,7 +35,12 @@ async def create_console_handler(page, interview_id: str, status_state: dict,
 
             # ─── Interim Results ───────────────────────────────────
             if text.startswith('STT_INTERIM:'):
-                interim_text = text.split('STT_INTERIM:', 1)[1].strip()
+                import json as _json
+                raw = text.split('STT_INTERIM:', 1)[1].strip()
+                try:
+                    interim_text = _json.loads(raw)
+                except (_json.JSONDecodeError, ValueError):
+                    interim_text = raw
                 if interim_text:
                     print(f"[INTERIM] {interim_text[:120]}")
                 return
@@ -53,14 +58,19 @@ async def create_console_handler(page, interview_id: str, status_state: dict,
                     clear_speech_buffer()
                     if mongo_connected and db is not None:
                         async def _write_interrupt():
-                            try:
-                                await db.interviews.update_one(
-                                    {"interview_id": interview_id},
-                                    {"$set": {"tts_interrupt": True}}
-                                )
-                                await push_log("[INTERRUPT] Candidate interrupted bot")
-                            except Exception as int_err:
-                                print(f"Interrupt signal error: {int_err}")
+                            for _attempt in range(3):
+                                try:
+                                    await db.interviews.update_one(
+                                        {"interview_id": interview_id},
+                                        {"$set": {"tts_interrupt": True}}
+                                    )
+                                    await push_log("[INTERRUPT] Candidate interrupted bot")
+                                    return
+                                except Exception as int_err:
+                                    if _attempt < 2:
+                                        await asyncio.sleep(0.1)
+                                    else:
+                                        print(f"Interrupt signal error after 3 attempts: {int_err}")
                         asyncio.create_task(_write_interrupt())
                 else:
                     msg_log = "[SPEECH STARTED] Candidate speaking..."
@@ -82,7 +92,12 @@ async def create_console_handler(page, interview_id: str, status_state: dict,
 
             # ─── Final Transcript ──────────────────────────────────
             if text.startswith('TRANSCRIPT_EVENT:'):
-                final_text = text.split('TRANSCRIPT_EVENT:', 1)[1].strip()
+                import json as _json
+                raw = text.split('TRANSCRIPT_EVENT:', 1)[1].strip()
+                try:
+                    final_text = _json.loads(raw)
+                except (_json.JSONDecodeError, ValueError):
+                    final_text = raw
                 if final_text:
                     # Accumulate (candidate may speak in multiple segments)
                     buffer = get_speech_buffer()

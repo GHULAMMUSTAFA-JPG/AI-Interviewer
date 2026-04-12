@@ -76,7 +76,7 @@ RETRY_WAIT_MIN = 1
 RETRY_WAIT_MAX = 10
 
 # Prompt Optimization
-MAX_CONVERSATION_HISTORY = 3  # Last 3 messages only
+MAX_CONVERSATION_HISTORY = int(os.getenv("MAX_CONVERSATION_HISTORY", "6"))
 
 # Fallback responses — set True to use hardcoded strings when LLM fails or validation fails.
 # When False, exceptions propagate and validation warnings are logged but do not replace LLM output.

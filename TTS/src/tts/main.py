@@ -193,6 +193,9 @@ class TTSService:
                 logger.info(f"Transcript interrupted by candidate: {doc.id}")
                 # Only schedule resume if not already pending AND this isn't itself
                 # a resumed transcript (prevents cascade of re-resumes).
+                # If a resumed response is also interrupted, we do NOT reschedule —
+                # the candidate is actively speaking; the pipeline will respond to them.
+                # Silence timeout (180s) handles the case where they say nothing further.
                 is_resume = getattr(doc, "metadata", None) and (
                     doc.metadata or {}
                 ).get("resumed_after_interrupt")
@@ -201,6 +204,11 @@ class TTSService:
                     interrupted_at = datetime.utcnow()
                     asyncio.create_task(
                         self._maybe_resume(doc.interview_id, doc.text, interrupted_at)
+                    )
+                elif is_resume:
+                    logger.info(
+                        f"Resumed transcript also interrupted — not re-scheduling "
+                        f"(silence timeout will handle if candidate says nothing): {doc.id}"
                     )
 
         except Exception as exc:
@@ -226,7 +234,7 @@ class TTSService:
 
         30s wait accounts for LLM call latency (Gemini can take 10-20s).
         """
-        RESUME_WAIT_SEC = 30.0
+        RESUME_WAIT_SEC = 45.0  # covers slow Gemini calls (10-20s) + retries + DB latency
         await asyncio.sleep(RESUME_WAIT_SEC)
         try:
             db = self._mongo_client[config.mongodb_db]
