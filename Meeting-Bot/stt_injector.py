@@ -10,16 +10,24 @@ SPEECH_INJECTION_SCRIPT = """
     let transcript           = "";     // Accumulated confirmed finals (cleared each bot turn)
     let isBotSpeaking        = false;  // Hard gate: true = discard everything
     let botStoppedAt         = 0;      // Timestamp when bot stopped (for echo time gate)
-    let silenceTimer         = null;   // Fires SILENCE_MS after last final → save
+    let silenceTimer         = null;   // Fires VAD_SILENCE_MS after last final → save
     let maxDurTimer          = null;   // Fires MAX_SPEECH_MS after speech starts → force-save
     let recognition          = null;
     let isRunning            = false;
     let interviewActive      = true;
     let restartBackoff       = 1500;   // ms — doubles on 'aborted', resets on success
 
+    // ─── VAD (Voice Activity Detection) state ────────────────────
+    // Replaces the old 4500ms fixed silence timer with a 300ms VAD window.
+    // When onresult fires, we reset a 300ms timer. If no new onresult fires
+    // within 300ms, speech is considered ended and we save immediately.
+    // This cuts latency from ~4500ms → ~300ms for response time.
+    let vadState             = "IDLE";  // IDLE | SPEAKING | SILENCE_DETECT
+    let vadSilenceTimer      = null;    // Fires after VAD_SILENCE_MS of no new finals
+
     // Expose state for Python health monitoring
     window.__stt_health = function() {
-        return { isRunning, restartBackoff, interviewActive, isBotSpeaking };
+        return { isRunning, restartBackoff, interviewActive, isBotSpeaking, vadState };
     };
 
     // Python watchdog calls this when it detects isRunning=false for too long
@@ -44,7 +52,7 @@ SPEECH_INJECTION_SCRIPT = """
     let interruptConfirmed    = false; // interrupt already sent this bot turn
 
     // ─── Constants ───────────────────────────────────────────────
-    const SILENCE_MS           = 4500;  // ms of silence after last confirmed word → save (candidates pause mid-thought)
+    const VAD_SILENCE_MS       = 300;   // ms of silence after last final → speech ended (was 4500ms)
     const ECHO_GATE_MS         = 700;   // ms to ignore STT after bot stops (Google STT queue drains in ~300-500ms)
     const MAX_SPEECH_MS        = 45000; // ms — force-save when onspeechend never fires (technical answers exceed 25s)
     const MIN_CONFIDENCE       = 0.55;  // discard finals below this; 0 = not reported → keep
@@ -71,6 +79,8 @@ SPEECH_INJECTION_SCRIPT = """
     function _clearTimers() {
         if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
         if (maxDurTimer)  { clearTimeout(maxDurTimer);  maxDurTimer  = null; }
+        if (vadSilenceTimer) { clearTimeout(vadSilenceTimer); vadSilenceTimer = null; }
+        vadState = "IDLE";
     }
 
     function _clearInterruptState() {
@@ -238,12 +248,23 @@ SPEECH_INJECTION_SCRIPT = """
             }
 
             if (gotFinal) {
-                // ── Sub-feature: Silence timer ──────────────────────
-                if (silenceTimer) clearTimeout(silenceTimer);
-                silenceTimer = setTimeout(function() {
-                    silenceTimer = null;
-                    _trySave();
-                }, SILENCE_MS);
+                // ── VAD-based speech end detection ──────────────────
+                // Instead of waiting 4500ms of silence, we detect speech ended
+                // after just 300ms of no new finals. This cuts response latency
+                // from ~4500ms → ~300ms.
+                vadState = "SPEAKING";
+                if (vadSilenceTimer) clearTimeout(vadSilenceTimer);
+
+                vadSilenceTimer = setTimeout(function() {
+                    vadSilenceTimer = null;
+                    if (vadState === "SPEAKING" && transcript.trim() && !isBotSpeaking) {
+                        vadState = "IDLE";
+                        emit("STT_VAD_SPEECH_END:");
+                        _trySave();
+                    } else {
+                        vadState = "IDLE";
+                    }
+                }, VAD_SILENCE_MS);
             }
         };
 
@@ -251,11 +272,20 @@ SPEECH_INJECTION_SCRIPT = """
             if (maxDurTimer) { clearTimeout(maxDurTimer); maxDurTimer = null; }
             if (isBotSpeaking) return;
             emit("STT_SPEECH_END:");
-            if (!silenceTimer && transcript.trim()) {
-                silenceTimer = setTimeout(function() {
-                    silenceTimer = null;
-                    _trySave();
-                }, SILENCE_MS);
+            // VAD handles speech end detection, but onspeechend is a fallback
+            // for when Google's speech engine detects end-of-utterance.
+            if (!vadSilenceTimer && transcript.trim()) {
+                vadState = "SILENCE_DETECT";
+                vadSilenceTimer = setTimeout(function() {
+                    vadSilenceTimer = null;
+                    if (vadState === "SILENCE_DETECT" && !isBotSpeaking) {
+                        vadState = "IDLE";
+                        emit("STT_VAD_SPEECH_END:");
+                        _trySave();
+                    } else {
+                        vadState = "IDLE";
+                    }
+                }, VAD_SILENCE_MS);
             }
         };
 

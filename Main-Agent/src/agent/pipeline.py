@@ -97,11 +97,12 @@ async def process_candidate_message(
     """
     pipeline_start_time = time.perf_counter()
     start_time = datetime.utcnow()
+    request_id = f"req-{transcript_id[:8]}-{int(time.time()*1000) % 100000}"
 
     try:
         # ===== STAGE 1: LOAD CONTEXT (OPTIMIZED with caching) =====
         stage1_start = time.perf_counter()
-        logger_struct.info("stage1_loading_context", transcript_id=transcript_id)
+        logger_struct.info("stage1_loading_context", transcript_id=transcript_id, request_id=request_id)
         context = await load_interview_context(db, transcript_id)
         stage1_latency = (time.perf_counter() - stage1_start) * 1000
         logger_struct.debug("stage1_complete", latency_ms=round(stage1_latency, 2))
@@ -376,6 +377,7 @@ async def process_candidate_message(
             stage3_latency_ms=round(stage3_latency, 2),
             stage4_latency_ms=round(stage4_latency, 2),
             interview_id=context.interview_id,
+            request_id=request_id,
             phase=new_phase,
             turn=new_turn_count,
             is_fallback=is_fallback,
@@ -393,6 +395,7 @@ async def process_candidate_message(
             error=str(e),
             error_type=type(e).__name__,
             latency_ms=round(total_latency_ms, 2),
+            request_id=request_id,
             exc_info=True
         )
         # Best-effort: reset agent status back to idle on any failure

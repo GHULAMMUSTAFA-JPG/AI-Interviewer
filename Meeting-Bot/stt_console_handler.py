@@ -3,21 +3,22 @@ STT Console Handler — captures Web Speech API events from browser console.
 
 Handles:
 - Parsing STT events (interim, speech start/end, final transcripts)
-- Triggering interrupt when candidate speaks during bot
-- Accumulating speech segments in buffer
-- Deferred flush (500ms after SPEECH_END, 2s safety net)
+- Triggering interrupt via Redis pub/sub (primary) + MongoDB (parallel)
+- Accumulating speech segments in per-interview Redis buffer
+- Deferred flush (VAD-based, 300ms after speech end)
 """
 import asyncio
+import json
+import time
 from logger import push_log
 from stt_speech_buffer import (
-    get_speech_buffer, set_speech_buffer, clear_speech_buffer,
-    get_speech_timer, set_speech_timer, update_last_speech_time,
-    _delayed_flush
+    append_speech, clear_speech_buffer, reset_session,
+    _delayed_flush, cancel_pending_flush
 )
 
 
 async def create_console_handler(page, interview_id: str, status_state: dict,
-                                  db=None, mongo_connected: bool = False):
+                                  redis=None, db=None, mongo_connected: bool = False):
     """
     Create and attach console event handler to capture Web Speech API transcripts.
 
@@ -25,9 +26,36 @@ async def create_console_handler(page, interview_id: str, status_state: dict,
         page: Playwright page object
         interview_id: Current interview ID
         status_state: Dict with {"bot_speaking": bool}
+        redis: Redis client (for speech buffer + interrupt pub/sub)
         db: MongoDB database instance
         mongo_connected: Whether MongoDB is connected
     """
+    _request_id = 0
+
+    def _new_request_id():
+        nonlocal _request_id
+        _request_id += 1
+        return f"req-{interview_id[:8]}-{_request_id}"
+
+    async def _publish_interrupt():
+        """Publish interrupt to Redis (primary) + MongoDB (parallel)."""
+        if redis:
+            try:
+                await redis.publish(
+                    f"interview:{interview_id}:interrupt",
+                    json.dumps({"request_id": _new_request_id(), "timestamp": time.time()})
+                )
+            except Exception as e:
+                print(f"Redis interrupt publish error: {e}")
+
+        if mongo_connected and db is not None:
+            try:
+                await db.interviews.update_one(
+                    {"interview_id": interview_id},
+                    {"$set": {"tts_interrupt": True}}
+                )
+            except Exception:
+                pass  # Redis is primary, MongoDB is secondary
 
     async def _handle_console(msg):
         try:
@@ -35,11 +63,10 @@ async def create_console_handler(page, interview_id: str, status_state: dict,
 
             # ─── Interim Results ───────────────────────────────────
             if text.startswith('STT_INTERIM:'):
-                import json as _json
                 raw = text.split('STT_INTERIM:', 1)[1].strip()
                 try:
-                    interim_text = _json.loads(raw)
-                except (_json.JSONDecodeError, ValueError):
+                    interim_text = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
                     interim_text = raw
                 if interim_text:
                     print(f"[INTERIM] {interim_text[:120]}")
@@ -47,73 +74,60 @@ async def create_console_handler(page, interview_id: str, status_state: dict,
 
             # ─── Speech Start ──────────────────────────────────────
             if text.startswith('STT_SPEECH_START:'):
-                update_last_speech_time()
+                if redis:
+                    from stt_speech_buffer import update_last_speech_time
+                    update_last_speech_time(interview_id)
+
                 if status_state["bot_speaking"]:
                     # Candidate is cutting in — clear stale buffer and signal interrupt.
-                    # Use create_task so the DB write does not block the console handler loop.
-                    timer = get_speech_timer()
-                    if timer and not timer.done():
-                        timer.cancel()
-                        set_speech_timer(None)
-                    clear_speech_buffer()
-                    if mongo_connected and db is not None:
-                        async def _write_interrupt():
-                            for _attempt in range(3):
-                                try:
-                                    await db.interviews.update_one(
-                                        {"interview_id": interview_id},
-                                        {"$set": {"tts_interrupt": True}}
-                                    )
-                                    await push_log("[INTERRUPT] Candidate interrupted bot")
-                                    return
-                                except Exception as int_err:
-                                    if _attempt < 2:
-                                        await asyncio.sleep(0.1)
-                                    else:
-                                        print(f"Interrupt signal error after 3 attempts: {int_err}")
-                        asyncio.create_task(_write_interrupt())
+                    cancel_pending_flush(interview_id)
+                    if redis:
+                        await clear_speech_buffer(redis, interview_id)
+
+                    # Fire interrupt: Redis pub/sub (5ms) + MongoDB parallel
+                    asyncio.create_task(_publish_interrupt())
+                    await push_log("[INTERRUPT] Candidate interrupted bot")
                 else:
-                    msg_log = "[SPEECH STARTED] Candidate speaking..."
-                    await push_log(msg_log)
+                    await push_log("[SPEECH STARTED] Candidate speaking...")
                 return
 
-            # ─── Speech End ────────────────────────────────────────
-            if text.startswith('STT_SPEECH_END:'):
-                msg_log = "[SPEECH ENDED] Waiting for final transcript..."
-                await push_log(msg_log)
+            # ─── VAD Speech End ────────────────────────────────────
+            if text.startswith('STT_VAD_SPEECH_END:'):
+                # VAD detected speech ended (300ms silence) — flush immediately
+                cancel_pending_flush(interview_id)
+                if redis:
+                    from stt_speech_buffer import _flush_speech_buffer
+                    asyncio.create_task(_flush_speech_buffer(redis, interview_id))
+                await push_log("[VAD END] Speech ended — flushing buffer")
+                return
 
-                # Flush after 500ms to catch any last TRANSCRIPT_EVENT from JS
-                timer = get_speech_timer()
-                if timer and not timer.done():
-                    timer.cancel()
-                new_timer = asyncio.create_task(_delayed_flush(interview_id, 0.5))
-                set_speech_timer(new_timer)
+            # ─── Speech End (fallback) ─────────────────────────────
+            if text.startswith('STT_SPEECH_END:'):
+                # Fallback: onspeechend fired but VAD may have already handled it
+                cancel_pending_flush(interview_id)
+                if redis:
+                    from stt_speech_buffer import _flush_speech_buffer
+                    # Short delay to catch any trailing TRANSCRIPT_EVENT
+                    new_timer = asyncio.create_task(_delayed_flush(redis, interview_id, 0.3))
+                    from stt_speech_buffer import _speech_timers
+                    _speech_timers[interview_id] = new_timer
                 return
 
             # ─── Final Transcript ──────────────────────────────────
             if text.startswith('TRANSCRIPT_EVENT:'):
-                import json as _json
                 raw = text.split('TRANSCRIPT_EVENT:', 1)[1].strip()
                 try:
-                    final_text = _json.loads(raw)
-                except (_json.JSONDecodeError, ValueError):
+                    final_text = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
                     final_text = raw
                 if final_text:
-                    # Accumulate (candidate may speak in multiple segments)
-                    buffer = get_speech_buffer()
-                    buffer = (buffer + " " + final_text).strip() if buffer else final_text
-                    set_speech_buffer(buffer)
-                    update_last_speech_time()
+                    if redis:
+                        await append_speech(redis, interview_id, final_text)
+                        from stt_speech_buffer import update_last_speech_time
+                        update_last_speech_time(interview_id)
 
                     msg_log = f"[STT FINAL] \"{final_text[:80]}\""
                     await push_log(msg_log)
-
-                    # Start a delayed flush as safety net (2s) in case SPEECH_END never fires
-                    timer = get_speech_timer()
-                    if timer and not timer.done():
-                        timer.cancel()
-                    new_timer = asyncio.create_task(_delayed_flush(interview_id, 2.0))
-                    set_speech_timer(new_timer)
                 return
 
             # ─── STT Errors ────────────────────────────────────────

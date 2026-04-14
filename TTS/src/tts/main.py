@@ -167,18 +167,33 @@ class TTSService:
             else:
                 # --- Cache miss: synthesize from ElevenLabs ---
                 audio_buffer: list[bytes] = []
-                raw_chunks = self._synthesizer.synthesize(doc.text)
-                teed = self._buffered(raw_chunks, audio_buffer)
 
+                # Wrap synthesis + playback in a 60-second timeout
                 try:
-                    await self._player.play(teed, self._interrupt_handler.stop_event)
+                    raw_chunks = self._synthesizer.synthesize(doc.text)
+                    teed = self._buffered(raw_chunks, audio_buffer)
+
+                    await asyncio.wait_for(
+                        self._player.play(teed, self._interrupt_handler.stop_event),
+                        timeout=60.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        f"TTS synthesis/playback timed out after 60s for: {doc.id} "
+                        f"text='{doc.text[:80]}...'"
+                    )
+                    audio_data = b"".join(audio_buffer) if audio_buffer else None
+                    await self._transcript_updater.mark_played(doc.id, audio_data)
+                    return
                 except Exception as audio_exc:
-                    # Audio device unavailable (e.g. inside a container without PulseAudio) —
-                    # drain the generator so the buffer is still filled
+                    # Audio device unavailable — drain generator to fill buffer
                     logger.warning(
                         f"Audio playback unavailable: {audio_exc} — synthesizing to DB only"
                     )
-                    async for _ in teed:
+                    try:
+                        async for _ in teed:
+                            pass
+                    except Exception:
                         pass
 
                 audio_data = b"".join(audio_buffer) if audio_buffer else None

@@ -394,10 +394,10 @@ class QwenProvider(LLMProvider):
         before_sleep=before_sleep_log(logger_struct, logging.WARNING),
         reraise=True,
     )
-    async def generate_combined(self, prompt: str) -> tuple[str, dict]:
+    async def generate_combined(self, prompt: str) -> dict:
         """
         Qwen doesn't support JSON mode natively, so we call generate() and parse.
-        Returns (response_text, empty_metadata).
+        Returns {"response": text, "summary": {}} — compatible with pipeline.
         """
         text = await self._call_qwen(prompt)
         metadata = {}
@@ -408,7 +408,7 @@ class QwenProvider(LLMProvider):
                 metadata = json.loads(json_match.group())
             except json.JSONDecodeError:
                 pass
-        return text, metadata
+        return {"response": text, "summary": metadata}
 
     @retry(
         stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),

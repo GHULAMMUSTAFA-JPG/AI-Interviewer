@@ -23,8 +23,7 @@ from media_controls import ensure_mic_on, disable_camera
 from state_manager import set_bot_state
 from meeting_watcher import watch_for_leave
 from stt_speech_buffer import (
-    init_speech_state, _flush_speech_buffer, get_speech_buffer,
-    clear_speech_buffer, reset_session, cancel_pending_flush, get_last_speech_time
+    init_speech_state, reset_session, cancel_pending_flush, get_last_speech_time
 )
 from stt_console_handler import create_console_handler
 from stt_echo_guard import create_echo_guard_watcher
@@ -56,8 +55,7 @@ async def join_meeting_and_transcribe(
         8. Capture ALL speech during meeting (buffer locally)
         9. When meeting ends: insert ONE final transcript
     """
-    init_speech_state()  # Reset speech state
-    reset_session()
+    init_speech_state()  # Reset speech state (no-op, kept for clarity)
 
     temp_dir = tempfile.mkdtemp(prefix="meet_bot_")
     session_id = interview_id or datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -153,9 +151,20 @@ async def join_meeting_and_transcribe(
             # Track bot speaking status for interruption and echo cancellation
             status_state = {"bot_speaking": False}
 
-            # Create console handler for STT events
+            # Get Redis client for per-interview speech buffer + interrupt pub/sub
+            from redis_client import get_redis
+            _redis = None
+            try:
+                _redis = await get_redis()
+            except Exception as rerr:
+                await push_log(f"Redis unavailable for speech buffer: {rerr}")
+
+            if _redis:
+                await reset_session(_redis, interview_id)
+
+            # Create console handler for STT events (Redis-backed speech buffer)
             await create_console_handler(
-                page, interview_id, status_state, db, mongo_connected
+                page, interview_id, status_state, _redis, db, mongo_connected
             )
             page.on('pageerror', lambda err: print(f"[PAGE ERROR] {err}"))
 
@@ -476,6 +485,39 @@ async def join_meeting_and_transcribe(
                 db, interview_id, status_state, page, mongo_connected
             )
 
+            # State-sync heartbeat: periodically verify Python's bot_speaking
+            # against MongoDB. A single dropped Redis "idle" pub/sub message
+            # can leave status_state["bot_speaking"] = True permanently, causing
+            # ALL future candidate speech to be treated as interrupt attempts —
+            # the interview goes deaf with no error logged.
+            async def _sync_bot_speaking_state():
+                try:
+                    while True:
+                        await asyncio.sleep(10)
+                        if not status_state.get("bot_speaking", False):
+                            continue
+                        try:
+                            doc = await db.interviews.find_one(
+                                {"interview_id": interview_id},
+                                projection={"bot_speaking": 1}
+                            )
+                            if doc and not doc.get("bot_speaking", True):
+                                await push_log(
+                                    "[STATE SYNC] bot_speaking desync detected — "
+                                    "Redis said speaking but MongoDB says idle. Force-syncing."
+                                )
+                                status_state["bot_speaking"] = False
+                                try:
+                                    await page.evaluate("window.__tts_ended(false)")
+                                except Exception:
+                                    pass
+                        except Exception as sync_err:
+                            await push_log(f"[STATE SYNC] Check failed (non-fatal): {sync_err}")
+                except asyncio.CancelledError:
+                    pass
+
+            state_sync_task = asyncio.create_task(_sync_bot_speaking_state())
+
             # Inactivity timeout
             INACTIVITY_TIMEOUT = 600
 
@@ -483,7 +525,7 @@ async def join_meeting_and_transcribe(
                 try:
                     while True:
                         await asyncio.sleep(60)
-                        elapsed = asyncio.get_event_loop().time() - get_last_speech_time()
+                        elapsed = asyncio.get_event_loop().time() - get_last_speech_time(interview_id)
                         if elapsed > INACTIVITY_TIMEOUT:
                             msg = f"⏰ Meeting TIMEOUT ({INACTIVITY_TIMEOUT}s) — no candidate speech"
                             await push_log(msg)
@@ -537,10 +579,13 @@ async def join_meeting_and_transcribe(
                             retry_delay = 1.0
                             async for change in stream:
                                 try:
-                                    if get_speech_buffer().strip():
-                                        msg = "🤖 Agent incoming — flushing partial candidate buffer"
-                                        await push_log(msg)
-                                        await _flush_speech_buffer(interview_id)
+                                    if _redis:
+                                        from stt_speech_buffer import _flush_speech_buffer, append_speech
+                                        buf = await _redis.get(f"speech:{interview_id}:buffer")
+                                        if buf and buf.decode().strip():
+                                            msg = "🤖 Agent incoming — flushing partial candidate buffer"
+                                            await push_log(msg)
+                                            await _flush_speech_buffer(_redis, interview_id)
                                 except Exception as inner_err:
                                     msg = f"⚠️ Agent transcript watcher inner error: {inner_err}"
                                     await push_log(msg)
@@ -567,7 +612,8 @@ async def join_meeting_and_transcribe(
 
             # Cancel all background tasks
             for task in [heartbeat_task, audio_routing_task, stt_health_task,
-                         pa_health_task, speaking_watcher_task, agent_transcript_task, inactivity_task]:
+                         pa_health_task, speaking_watcher_task, agent_transcript_task, inactivity_task,
+                         state_sync_task]:
                 if task and not task.done():
                     task.cancel()
                     try:
