@@ -558,6 +558,18 @@ async def join_meeting_and_transcribe(
             # NOTE: does NOT call __tts_started() here. TTS arm() sets bot_speaking=True in
             # MongoDB, which _watch_bot_speaking picks up and calls __tts_started() at the
             # moment audio actually plays — not 3-4s early when the transcript is inserted.
+            # Phase → silence ms mapping for phase-aware VAD.
+            # CLOSING uses shorter window (candidate says "yes/no" and waits for reply).
+            # TECHNICAL uses longer window (candidate is explaining a system design).
+            _PHASE_SILENCE_MS = {
+                "INTRO": 4000,
+                "EXPERIENCE": 4000,
+                "TECHNICAL": 5000,
+                "BEHAVIORAL": 4000,
+                "CLOSING": 2500,
+            }
+            _last_known_phase: list[str] = ["INTRO"]  # mutable cell for closure
+
             async def _watch_agent_transcripts():
                 if not mongo_connected or db is None:
                     return
@@ -583,11 +595,32 @@ async def join_meeting_and_transcribe(
                                         from stt_speech_buffer import _flush_speech_buffer, append_speech
                                         buf = await _redis.get(f"speech:{interview_id}:buffer")
                                         if buf and buf.decode().strip():
-                                            msg = "🤖 Agent incoming — flushing partial candidate buffer"
+                                            msg = "Agent incoming — flushing partial candidate buffer"
                                             await push_log(msg)
                                             await _flush_speech_buffer(_redis, interview_id)
+
+                                    # Phase-aware silence: read current phase and update JS if changed.
+                                    if mongo_connected and db is not None:
+                                        try:
+                                            interview_doc = await db.interviews.find_one(
+                                                {"interview_id": interview_id},
+                                                projection={"phase": 1}
+                                            )
+                                            current_phase = (interview_doc or {}).get("phase", "INTRO")
+                                            if current_phase != _last_known_phase[0]:
+                                                silence_ms = _PHASE_SILENCE_MS.get(current_phase, 4000)
+                                                _last_known_phase[0] = current_phase
+                                                await page.evaluate(
+                                                    f"window.__set_silence_ms && window.__set_silence_ms({silence_ms})"
+                                                )
+                                                await push_log(
+                                                    f"Phase changed to {current_phase} — "
+                                                    f"silence threshold set to {silence_ms}ms"
+                                                )
+                                        except Exception:
+                                            pass  # Never block buffer flush on phase read failure
                                 except Exception as inner_err:
-                                    msg = f"⚠️ Agent transcript watcher inner error: {inner_err}"
+                                    msg = f"Agent transcript watcher inner error: {inner_err}"
                                     await push_log(msg)
                     except asyncio.CancelledError:
                         return

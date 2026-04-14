@@ -53,6 +53,9 @@ SPEECH_INJECTION_SCRIPT = """
 
     // ─── Constants ───────────────────────────────────────────────
     const VAD_SILENCE_MS       = 300;   // ms of silence after last final → speech ended (was 4500ms)
+    // Phase-aware silence: pipeline sets this per phase via window.__set_silence_ms().
+    // Default matches VAD_SILENCE_MS. CLOSING=2500ms, TECHNICAL=5000ms, others=4000ms.
+    let VAD_SILENCE_MS_dynamic = VAD_SILENCE_MS;
     const ECHO_GATE_MS         = 700;   // ms to ignore STT after bot stops (Google STT queue drains in ~300-500ms)
     const MAX_SPEECH_MS        = 45000; // ms — force-save when onspeechend never fires (technical answers exceed 25s)
     const MIN_CONFIDENCE       = 0.55;  // discard finals below this; 0 = not reported → keep
@@ -150,6 +153,15 @@ SPEECH_INJECTION_SCRIPT = """
         _clearInterruptState();
         if (recognition) recognition.stop();
         emit("STT_STOPPED:");
+    };
+
+    // ─── Phase-aware silence threshold ───────────────────────────
+    // Python calls this after each agent turn when it detects a phase change.
+    // Phases that expect short answers (CLOSING) use a shorter silence window
+    // to avoid making the candidate wait 4.5s for a response to "yes".
+    window.__set_silence_ms = function(ms) {
+        VAD_SILENCE_MS_dynamic = Math.max(200, Math.min(8000, ms));
+        emit("STT_SILENCE_MS_SET:", VAD_SILENCE_MS_dynamic);
     };
 
     // ─── Core recognition ─────────────────────────────────────────
@@ -264,7 +276,7 @@ SPEECH_INJECTION_SCRIPT = """
                     } else {
                         vadState = "IDLE";
                     }
-                }, VAD_SILENCE_MS);
+                }, VAD_SILENCE_MS_dynamic);
             }
         };
 
@@ -285,7 +297,7 @@ SPEECH_INJECTION_SCRIPT = """
                     } else {
                         vadState = "IDLE";
                     }
-                }, VAD_SILENCE_MS);
+                }, VAD_SILENCE_MS_dynamic);
             }
         };
 

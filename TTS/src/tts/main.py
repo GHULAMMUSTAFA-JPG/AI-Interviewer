@@ -217,8 +217,30 @@ class TTSService:
                 if not is_resume and doc.interview_id not in self._pending_resumes:
                     self._pending_resumes.add(doc.interview_id)
                     interrupted_at = datetime.utcnow()
+
+                    # Estimate where in the text we were interrupted.
+                    # audio_buffer contains chunks generated (and played) up to interrupt.
+                    # Ratio of played bytes to total estimated bytes ≈ ratio of chars heard.
+                    interrupted_at_char: int | None = None
+                    try:
+                        played_bytes = sum(len(c) for c in audio_buffer) if 'audio_buffer' in dir() else (
+                            len(doc.audio_data) if doc.audio_data else 0
+                        )
+                        # Rough estimate: Edge TTS s16le 22050Hz mono → ~44100 bytes/sec
+                        # Total expected bytes ≈ len(text) chars × ~150wpm × 60s/min × 44100 bytes/s
+                        # Simpler: if we have the full synthesized audio, ratio gives a good estimate
+                        total_bytes = len(doc.audio_data) if doc.audio_data else (
+                            sum(len(c) for c in audio_buffer) * 2  # assume ~50% through if no full data
+                        )
+                        if total_bytes > 0 and played_bytes > 0:
+                            ratio = min(played_bytes / total_bytes, 1.0)
+                            interrupted_at_char = int(ratio * len(doc.text))
+                    except Exception:
+                        pass
+
                     asyncio.create_task(
-                        self._maybe_resume(doc.interview_id, doc.text, interrupted_at)
+                        self._maybe_resume(doc.interview_id, doc.text, interrupted_at,
+                                           interrupted_at_char=interrupted_at_char)
                     )
                 elif is_resume:
                     logger.info(
@@ -239,15 +261,20 @@ class TTSService:
             await self._interrupt_handler.disarm(doc.interview_id)
             await self._set_tts_status(doc.interview_id, "idle", interrupted=interrupted)
 
-    async def _maybe_resume(self, interview_id: str, text: str, interrupted_at: datetime) -> None:
+    async def _maybe_resume(self, interview_id: str, text: str, interrupted_at: datetime,
+                             interrupted_at_char: int | None = None) -> None:
         """
-        After a TTS interrupt, wait 30s for the candidate to say something
+        After a TTS interrupt, wait 45s for the candidate to say something
         meaningful. If no new agent transcript appears (meaning the pipeline
         never fired), re-insert the interrupted text so TTS plays it again.
         Prevents the conversation deadlocking when a false/brief interrupt
         fires but the candidate had nothing to say.
 
-        30s wait accounts for LLM call latency (Gemini can take 10-20s).
+        interrupted_at_char: approximate character offset in `text` where audio
+        stopped. Included in metadata so Main-Agent can generate a contextual
+        re-entry ("To continue from where I was...") instead of a verbatim replay.
+
+        45s wait accounts for LLM call latency (Gemini can take 10-20s).
         """
         RESUME_WAIT_SEC = 45.0  # covers slow Gemini calls (10-20s) + retries + DB latency
         await asyncio.sleep(RESUME_WAIT_SEC)
@@ -284,18 +311,26 @@ class TTSService:
             if interview and interview.get("status") in ("completed", "abandoned"):
                 return
 
-            # No response and interview still active — re-play interrupted text
+            # No response and interview still active — re-play interrupted text.
+            # Include interrupted_at_char so Main-Agent can generate a natural
+            # re-entry ("To continue from where I was...") using the context.
             logger.info(
                 f"Resume: no candidate reply after {RESUME_WAIT_SEC}s "
                 f"— resuming interrupted response [{interview_id}]"
+                + (f" (interrupted at char {interrupted_at_char})" if interrupted_at_char else "")
             )
+            resume_metadata: dict = {"resumed_after_interrupt": True}
+            if interrupted_at_char is not None:
+                resume_metadata["interrupted_at_char"] = interrupted_at_char
+                # Include the tail of what was unsaid so Main-Agent can incorporate it
+                resume_metadata["unsaid_text"] = text[interrupted_at_char:].strip()
             await col.insert_one({
                 "interview_id": interview_id,
                 "speaker": "agent",
                 "text": text,
                 "audio_url": None,
                 "timestamp": datetime.utcnow(),
-                "metadata": {"resumed_after_interrupt": True},
+                "metadata": resume_metadata,
             })
         except Exception as exc:
             logger.error(f"Resume check failed [{interview_id}]: {exc}")
