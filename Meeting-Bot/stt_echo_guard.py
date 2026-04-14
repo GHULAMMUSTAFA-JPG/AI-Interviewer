@@ -147,16 +147,22 @@ async def _watch_tts_status_redis(interview_id: str, status_state: dict, page):
                     status_state["bot_speaking"] = is_speaking
 
                     if is_speaking:
-                        msg = "Bot speaking (Redis) — delaying buffer clear + gating STT"
-                        await push_log(msg)
-
-                        # Delay matches interrupt_handler block window (500ms).
-                        # Candidate words spoken just before the bot starts are
-                        # preserved in the buffer during this window.
-                        await asyncio.sleep(_BUFFER_CLEAR_DELAY_SEC)
-
                         from stt_speech_buffer import clear_speech_buffer
-                        clear_speech_buffer()
+                        try:
+                            buf_bytes = await redis.get(f"speech:{interview_id}:buffer")
+                            buf_content = buf_bytes.decode() if buf_bytes else ""
+                        except Exception:
+                            buf_content = ""
+                        if buf_content.strip():
+                            # Delay only when buffer has content — preserve words spoken
+                            # just before the bot starts during this window.
+                            msg = "Bot speaking (Redis) — buffer non-empty, delaying clear + gating STT"
+                            await push_log(msg)
+                            await asyncio.sleep(_BUFFER_CLEAR_DELAY_SEC)
+                        else:
+                            msg = "Bot speaking (Redis) — buffer empty, gating STT immediately"
+                            await push_log(msg)
+                        await clear_speech_buffer(redis, interview_id)
                         await _safe_evaluate(page, "window.__tts_started()", "__tts_started")
                     else:
                         was_interrupted = data.get("interrupted", False)

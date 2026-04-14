@@ -1,21 +1,14 @@
-"""MongoDB-based interrupt handler.
+"""TTS interrupt handler — Redis-first optimistic interruption.
 
-Replaces the NATS-based interrupt handler. Uses a MongoDB change stream on
-interviews.interviews to detect when Meeting-Bot sets tts_interrupt=True on the
-active interview (because the candidate started speaking while the bot was talking).
+Flow (Redis path, ~50–200ms total):
+  1. Meeting-Bot publishes tts:{id}:interrupt_signal on onspeechstart (any audio).
+  2. TTS starts a 400ms countdown.
+  3a. If tts:{id}:interrupt_confirm arrives before 400ms → stop audio (~50ms total).
+  3b. If 400ms expires with no confirm → publish tts:{id}:interrupt_cancel → resume seamlessly.
 
-Flow:
-  1. TTS calls arm(interview_id) before starting audio playback.
-     - Clears stop_event
-     - Sets bot_speaking=True, tts_interrupt=False on the interview document
-     - Starts a background change stream task watching for tts_interrupt=True
-     - Blocks interrupts for first 500ms (bot always completes first 2-3 words)
-  2. AudioPlayer checks stop_event on every PCM chunk. When set, pacat is killed.
-  3. Meeting-Bot sets tts_interrupt=True when a caption arrives while bot is speaking.
-     - Change stream fires -> stop_event.set() -> audio stops mid-stream.
-  4. TTS calls disarm(interview_id) after audio finishes (naturally or interrupted).
-     - Cancels the watch task
-     - Sets bot_speaking=False on the interview document
+Fallback (MongoDB path, 500ms–2s):
+  If Redis is unavailable, falls back to watching tts_interrupt flag via MongoDB change stream.
+  No regression from current behaviour.
 """
 import asyncio
 import logging
@@ -28,32 +21,31 @@ from .config import config
 
 logger = logging.getLogger(__name__)
 
-# Interrupt block window - bot always completes first 500ms of speech (2-3 words)
+# Interrupt block window — bot always completes first 500ms of speech (2-3 words).
 INTERRUPT_BLOCK_WINDOW_SEC = 0.5
+# Optimistic countdown: if no confirm arrives within this window, treat as noise and cancel.
+INTERRUPT_CONFIRM_WINDOW_SEC = 0.4
 
 
 class InterruptHandler:
-    """Watches interviews.interviews for tts_interrupt flag via MongoDB change stream."""
+    """Redis-first optimistic interrupt handler with MongoDB fallback."""
 
     def __init__(self, mongo_client: AsyncIOMotorClient) -> None:
         self.db = mongo_client[config.mongodb_db]
         self._stop_event = asyncio.Event()
         self._watch_task: Optional[asyncio.Task] = None
         self._armed_at: float = 0.0
-        self._block_until: float = 0.0  # Timestamp until which interrupts are blocked
 
     @property
     def stop_event(self) -> asyncio.Event:
         return self._stop_event
 
     async def arm(self, interview_id: str) -> None:
-        """
-        Prepare for a new utterance:
-        - Clear stop_event so audio plays uninterrupted until an interrupt arrives.
-        - Set bot_speaking=True, tts_interrupt=False on the interview document
-          (clears any stale interrupt flag from the previous turn).
-        - Start the background change stream watcher for this interview.
-        - Block interrupts for first 500ms (bot always completes first 2-3 words).
+        """Prepare for a new utterance.
+
+        Clears stop_event, sets bot_speaking=True / tts_interrupt=False in MongoDB,
+        then starts the interrupt watcher (Redis-first, MongoDB fallback).
+        Blocks all interrupts for the first 500ms so bot speaks at least 2-3 words.
         """
         self._stop_event.clear()
 
@@ -62,7 +54,6 @@ class InterruptHandler:
             {"$set": {"bot_speaking": True, "tts_interrupt": False}},
         )
 
-        # Cancel any previous watch before starting a fresh one
         if self._watch_task and not self._watch_task.done():
             self._watch_task.cancel()
             try:
@@ -71,18 +62,11 @@ class InterruptHandler:
                 pass
 
         self._armed_at = asyncio.get_event_loop().time()
-        # Block interrupts for first 500ms - bot always completes first 2-3 words
-        self._block_until = self._armed_at + INTERRUPT_BLOCK_WINDOW_SEC
-        
         self._watch_task = asyncio.create_task(self._watch(interview_id))
-        logger.info(f"Interrupt handler armed: interview={interview_id} (blocked until {self._block_until - self._armed_at:.3f}s)")
+        logger.info(f"Interrupt handler armed: interview={interview_id}")
 
     async def disarm(self, interview_id: str) -> None:
-        """
-        Called after audio finishes (naturally or interrupted):
-        - Cancel the change stream watcher.
-        - Set bot_speaking=False so Meeting-Bot stops sending interrupt signals.
-        """
+        """Called after audio finishes (naturally or interrupted)."""
         if self._watch_task and not self._watch_task.done():
             self._watch_task.cancel()
             try:
@@ -97,15 +81,117 @@ class InterruptHandler:
         logger.info(f"Interrupt handler disarmed: interview={interview_id}")
 
     async def _watch(self, interview_id: str) -> None:
-        """Background task: change stream on interviews.interviews.
+        """Try Redis-first; fall back to MongoDB change stream if Redis unavailable."""
+        try:
+            from .redis_client import get_redis
+            redis = await get_redis()
+            await self._watch_redis(interview_id, redis)
+        except Exception as redis_err:
+            logger.warning(
+                f"Redis interrupt handler unavailable ({redis_err}), "
+                f"falling back to MongoDB for interview={interview_id}"
+            )
+            await self._watch_mongo(interview_id)
 
-        Fires when tts_interrupt becomes True on the given interview.
-        Sets stop_event so AudioPlayer stops mid-stream.
-        Blocks interrupts for first 500ms to let bot complete first 2-3 words.
+    # ─── Redis path (optimistic: fire-first, cancel-if-noise) ────────────────
 
-        Reconnects on transient MongoDB errors — a single exception must NOT
-        permanently disable interruptions for the rest of the audio session.
+    async def _watch_redis(self, interview_id: str, redis) -> None:
+        """Subscribe to interrupt_signal channel. On signal, start 400ms countdown.
+
+        If interrupt_confirm arrives within 400ms → stop audio.
+        If 400ms expires with no confirm → publish interrupt_cancel and resume.
+        Deduplicates rapid signals within the countdown window.
         """
+        signal_channel = f"tts:{interview_id}:interrupt_signal"
+        confirm_channel = f"tts:{interview_id}:interrupt_confirm"
+
+        pubsub = redis.pubsub()
+        await pubsub.subscribe(signal_channel, confirm_channel)
+        logger.debug(f"Redis interrupt: subscribed to {signal_channel}, {confirm_channel}")
+
+        countdown_task: Optional[asyncio.Task] = None
+        in_countdown = False
+
+        try:
+            async for message in pubsub.listen():
+                if message["type"] != "message":
+                    continue
+
+                channel = message["channel"]
+                if isinstance(channel, bytes):
+                    channel = channel.decode()
+
+                if channel == signal_channel:
+                    if in_countdown:
+                        logger.debug(
+                            f"Redis interrupt: duplicate signal ignored (countdown active): "
+                            f"interview={interview_id}"
+                        )
+                        continue
+
+                    elapsed = asyncio.get_event_loop().time() - self._armed_at
+                    if elapsed < INTERRUPT_BLOCK_WINDOW_SEC:
+                        logger.debug(
+                            f"Redis interrupt: signal blocked (first {INTERRUPT_BLOCK_WINDOW_SEC}s): "
+                            f"interview={interview_id}"
+                        )
+                        continue
+
+                    logger.info(
+                        f"Redis interrupt: signal received — starting {INTERRUPT_CONFIRM_WINDOW_SEC*1000:.0f}ms countdown: "
+                        f"interview={interview_id}"
+                    )
+                    in_countdown = True
+                    if countdown_task and not countdown_task.done():
+                        countdown_task.cancel()
+                    countdown_task = asyncio.create_task(
+                        self._countdown_then_cancel(interview_id, redis, pubsub)
+                    )
+
+                elif channel == confirm_channel:
+                    if not in_countdown:
+                        continue
+
+                    logger.info(
+                        f"Redis interrupt: confirm received — stopping audio: "
+                        f"interview={interview_id}"
+                    )
+                    if countdown_task and not countdown_task.done():
+                        countdown_task.cancel()
+
+                    self._stop_event.set()
+                    return  # One interrupt per utterance — done
+
+        except asyncio.CancelledError:
+            if countdown_task and not countdown_task.done():
+                countdown_task.cancel()
+        finally:
+            try:
+                await pubsub.unsubscribe(signal_channel, confirm_channel)
+            except Exception:
+                pass
+
+    async def _countdown_then_cancel(self, interview_id: str, redis, pubsub) -> None:
+        """Wait INTERRUPT_CONFIRM_WINDOW_SEC. If no confirm arrives, publish cancel."""
+        try:
+            await asyncio.sleep(INTERRUPT_CONFIRM_WINDOW_SEC)
+            # No confirm — treat as noise, publish cancel so Meeting-Bot clears accumulation
+            cancel_channel = f"tts:{interview_id}:interrupt_cancel"
+            try:
+                await redis.publish(cancel_channel, "cancel")
+                logger.info(
+                    f"Redis interrupt: no confirm in {INTERRUPT_CONFIRM_WINDOW_SEC*1000:.0f}ms "
+                    f"— published cancel: interview={interview_id}"
+                )
+            except Exception as e:
+                logger.warning(f"Redis interrupt: failed to publish cancel: {e}")
+        except asyncio.CancelledError:
+            pass  # Confirm arrived — countdown superseded
+
+    # ─── MongoDB fallback path ────────────────────────────────────────────────
+
+    async def _watch_mongo(self, interview_id: str) -> None:
+        """MongoDB change stream fallback. Identical logic to original handler."""
         pipeline = [
             {
                 "$match": {
@@ -120,12 +206,8 @@ class InterruptHandler:
                 async with self.db.interviews.watch(
                     pipeline, full_document="updateLookup"
                 ) as stream:
-                    retry_delay = 0.5  # reset on successful open
+                    retry_delay = 0.5
 
-                    # Post-open check: catch any tts_interrupt=True written in the
-                    # gap between arm()'s tts_interrupt=False clear and stream open.
-                    # Without this, an interrupt that lands in that window is silently
-                    # missed and the bot plays through without stopping.
                     try:
                         current = await self.db.interviews.find_one(
                             {"interview_id": interview_id},
@@ -136,7 +218,7 @@ class InterruptHandler:
                             if elapsed < INTERRUPT_BLOCK_WINDOW_SEC:
                                 await asyncio.sleep(INTERRUPT_BLOCK_WINDOW_SEC - elapsed)
                             logger.info(
-                                f"Interrupt caught via post-open check: interview={interview_id}"
+                                f"MongoDB interrupt (post-open check): interview={interview_id}"
                             )
                             self._stop_event.set()
                             return
@@ -147,28 +229,21 @@ class InterruptHandler:
                         full_doc = change.get("fullDocument") or {}
                         if full_doc.get("interview_id") == interview_id:
                             elapsed = asyncio.get_event_loop().time() - self._armed_at
-
-                            # Honour the block window so bot speaks at least 2-3 words
                             if elapsed < INTERRUPT_BLOCK_WINDOW_SEC:
-                                logger.debug(
-                                    f"Interrupt blocked (first {INTERRUPT_BLOCK_WINDOW_SEC}s): "
-                                    f"interview={interview_id}"
-                                )
                                 await asyncio.sleep(INTERRUPT_BLOCK_WINDOW_SEC - elapsed)
-
                             logger.info(
-                                f"Interrupt received: interview={interview_id} — stopping audio"
+                                f"MongoDB interrupt received: interview={interview_id}"
                             )
                             self._stop_event.set()
-                            return  # One interrupt per utterance — done
+                            return
+
             except asyncio.CancelledError:
-                return  # Normal — disarm() cancelled after audio finished
+                return
             except Exception as exc:
                 if self._stop_event.is_set():
-                    # Audio already finished/interrupted — no need to reconnect
                     return
                 logger.warning(
-                    f"Interrupt watch error (retry in {retry_delay:.1f}s): {exc}"
+                    f"MongoDB interrupt watch error (retry in {retry_delay:.1f}s): {exc}"
                 )
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, 10.0)

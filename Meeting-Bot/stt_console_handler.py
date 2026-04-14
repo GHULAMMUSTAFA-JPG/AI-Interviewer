@@ -31,23 +31,34 @@ async def create_console_handler(page, interview_id: str, status_state: dict,
         mongo_connected: Whether MongoDB is connected
     """
     _request_id = 0
+    _interrupt_signal_pending = False  # True while optimistic countdown is active
 
     def _new_request_id():
         nonlocal _request_id
         _request_id += 1
         return f"req-{interview_id[:8]}-{_request_id}"
 
-    async def _publish_interrupt():
-        """Publish interrupt to Redis (primary) + MongoDB (parallel)."""
+    async def _publish_interrupt_signal():
+        """Publish interrupt_signal immediately on onspeechstart (Redis-first optimistic path).
+
+        TTS starts a 400ms countdown. If interrupt_confirm arrives within 400ms, audio stops.
+        If no confirm, TTS publishes interrupt_cancel and resumes seamlessly.
+        MongoDB write runs in parallel as fallback for when Redis is unavailable.
+        """
+        nonlocal _interrupt_signal_pending
+        _interrupt_signal_pending = True
+
         if redis:
             try:
                 await redis.publish(
-                    f"interview:{interview_id}:interrupt",
+                    f"tts:{interview_id}:interrupt_signal",
                     json.dumps({"request_id": _new_request_id(), "timestamp": time.time()})
                 )
             except Exception as e:
-                print(f"Redis interrupt publish error: {e}")
+                print(f"Redis interrupt_signal publish error: {e}")
+                _interrupt_signal_pending = False
 
+        # MongoDB parallel write — fallback path for Redis-unavailable scenarios
         if mongo_connected and db is not None:
             try:
                 await db.interviews.update_one(
@@ -55,7 +66,26 @@ async def create_console_handler(page, interview_id: str, status_state: dict,
                     {"$set": {"tts_interrupt": True}}
                 )
             except Exception:
-                pass  # Redis is primary, MongoDB is secondary
+                pass
+
+    async def _publish_interrupt_confirm():
+        """Publish interrupt_confirm when real speech is detected (first onresult).
+
+        This resolves the 400ms countdown in TTS, causing immediate audio stop.
+        """
+        nonlocal _interrupt_signal_pending
+        if not _interrupt_signal_pending:
+            return
+        _interrupt_signal_pending = False
+
+        if redis:
+            try:
+                await redis.publish(
+                    f"tts:{interview_id}:interrupt_confirm",
+                    json.dumps({"timestamp": time.time()})
+                )
+            except Exception as e:
+                print(f"Redis interrupt_confirm publish error: {e}")
 
     async def _handle_console(msg):
         try:
@@ -79,14 +109,14 @@ async def create_console_handler(page, interview_id: str, status_state: dict,
                     update_last_speech_time(interview_id)
 
                 if status_state["bot_speaking"]:
-                    # Candidate is cutting in — clear stale buffer and signal interrupt.
+                    # Candidate is cutting in — clear stale buffer and fire interrupt_signal.
+                    # Optimistic: fire immediately, confirm or cancel within 400ms.
                     cancel_pending_flush(interview_id)
                     if redis:
                         await clear_speech_buffer(redis, interview_id)
 
-                    # Fire interrupt: Redis pub/sub (5ms) + MongoDB parallel
-                    asyncio.create_task(_publish_interrupt())
-                    await push_log("[INTERRUPT] Candidate interrupted bot")
+                    asyncio.create_task(_publish_interrupt_signal())
+                    await push_log("[INTERRUPT SIGNAL] Candidate audio detected — 400ms countdown started")
                 else:
                     await push_log("[SPEECH STARTED] Candidate speaking...")
                 return
@@ -121,6 +151,12 @@ async def create_console_handler(page, interview_id: str, status_state: dict,
                 except (json.JSONDecodeError, ValueError):
                     final_text = raw
                 if final_text:
+                    # Real speech confirmed — resolve optimistic countdown (interrupt_confirm).
+                    # This fires ~50ms after interrupt_signal, stopping audio immediately.
+                    if _interrupt_signal_pending:
+                        asyncio.create_task(_publish_interrupt_confirm())
+                        await push_log("[INTERRUPT CONFIRM] Real speech confirmed — stopping audio")
+
                     if redis:
                         await append_speech(redis, interview_id, final_text)
                         from stt_speech_buffer import update_last_speech_time

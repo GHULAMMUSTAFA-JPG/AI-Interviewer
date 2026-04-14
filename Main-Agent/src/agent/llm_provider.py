@@ -237,7 +237,7 @@ class GeminiProvider(LLMProvider):
     )
     async def generate_combined(self, prompt: str) -> dict:
         """ONE call returning {"response": str, "summary": str} using JSON output mode."""
-        return await llm_circuit_breaker.call(self._call_gemini_json, prompt)
+        return await summary_circuit_breaker.call(self._call_gemini_json, prompt)
 
 
 class OpenAIProvider(LLMProvider):
@@ -402,10 +402,15 @@ class QwenProvider(LLMProvider):
         text = await self._call_qwen(prompt)
         metadata = {}
         # Try to extract JSON from the response
-        json_match = re.search(r"\{[^}]*\}", text, re.DOTALL)
+        # Use multiline dotall so nested JSON objects and preambles are handled correctly.
+        # Old pattern r"\{[^}]*\}" would miss nested braces and silently fail.
+        json_match = re.search(r'\{[\s\S]*\}', text)
         if json_match:
             try:
-                metadata = json.loads(json_match.group())
+                parsed = json.loads(json_match.group())
+                if "response" in parsed:
+                    return parsed
+                metadata = parsed
             except json.JSONDecodeError:
                 pass
         return {"response": text, "summary": metadata}

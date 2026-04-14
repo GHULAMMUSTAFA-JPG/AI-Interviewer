@@ -114,8 +114,23 @@ class CircuitBreaker:
                     f"[CIRCUIT BREAKER] OPENING circuit after {self.failure_count} failures"
                 )
                 self.state = "OPEN"
+                # Write to Redis so UI and operators can detect degraded state
+                try:
+                    import asyncio as _asyncio
+                    _asyncio.ensure_future(self._write_redis_status("circuit_open"))
+                except Exception:
+                    pass
 
             raise
+
+    async def _write_redis_status(self, status: str) -> None:
+        """Write circuit breaker state to Redis for operator visibility."""
+        try:
+            from src.redis_client import get_redis
+            redis = await get_redis()
+            await redis.set(f"circuit_breaker:{id(self)}:status", status, ex=300)
+        except Exception:
+            pass  # Never block on Redis unavailability
 
 
 # Global circuit breaker instance for main interview LLM calls

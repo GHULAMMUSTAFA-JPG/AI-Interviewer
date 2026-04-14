@@ -507,10 +507,7 @@ async def join_meeting_and_transcribe(
                                     "Redis said speaking but MongoDB says idle. Force-syncing."
                                 )
                                 status_state["bot_speaking"] = False
-                                try:
-                                    await page.evaluate("window.__tts_ended(false)")
-                                except Exception:
-                                    pass
+                                await _safe_evaluate(page, "window.__tts_ended(false)", "__state_sync_tts_ended")
                         except Exception as sync_err:
                             await push_log(f"[STATE SYNC] Check failed (non-fatal): {sync_err}")
                 except asyncio.CancelledError:
@@ -650,8 +647,8 @@ async def join_meeting_and_transcribe(
                 if task and not task.done():
                     task.cancel()
                     try:
-                        await task
-                    except asyncio.CancelledError:
+                        await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
                         pass
 
             # Update status when meeting ends

@@ -43,6 +43,17 @@ from src.exceptions import (
 
 logger_struct = structlog.get_logger()
 
+# Per-interview asyncio locks — prevents two simultaneous LLM calls for the same interview.
+# Two rapid candidate messages would otherwise both enter the pipeline concurrently (wasted
+# tokens, stale-context risk). The second call waits, then reads updated context.
+_interview_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_interview_lock(interview_id: str) -> asyncio.Lock:
+    if interview_id not in _interview_locks:
+        _interview_locks[interview_id] = asyncio.Lock()
+    return _interview_locks[interview_id]
+
 
 async def _set_agent_status(interview_id: str, status: str) -> None:
     """Write agent status to Redis (fire-and-forget, never raises)."""
@@ -178,37 +189,40 @@ async def process_candidate_message(
         logger_struct.debug("stage2_complete", latency_ms=round(stage2_latency, 2))
 
         # ===== STAGE 3: CALL LLM =====
-        # On summary turns: one JSON call returns both response + updated summary.
-        # On regular turns: one plain call returns response only.
-        await _set_agent_status(context.interview_id, "thinking")
-        stage3_start = time.perf_counter()
-        logger_struct.info("stage3_calling_llm", provider=Config.LLM_PROVIDER, combined=needs_summary)
-        llm = get_llm_provider()
+        # Per-interview lock prevents two concurrent LLM calls for the same interview.
+        # The second message waits for the first to finish so it reads updated context.
+        async with _get_interview_lock(context.interview_id):
+            # On summary turns: one JSON call returns both response + updated summary.
+            # On regular turns: one plain call returns response only.
+            await _set_agent_status(context.interview_id, "thinking")
+            stage3_start = time.perf_counter()
+            logger_struct.info("stage3_calling_llm", provider=Config.LLM_PROVIDER, combined=needs_summary)
+            llm = get_llm_provider()
 
-        try:
-            if needs_summary:
-                combined_prompt = _build_combined_prompt(prompt, context.conversation_summary)
-                combined = await llm.generate_combined(combined_prompt)
-                response_text = combined.get("response", "").strip()
-                if not response_text:
-                    raise LLMException("Combined call returned empty response field")
-                _summary = combined.get("summary")
-                if _summary:
-                    new_summary = _summary[:500]
-            else:
-                response_text = await llm.generate(prompt)
-            is_fallback = False
-            stage3_latency = (time.perf_counter() - stage3_start) * 1000
-            logger_struct.info("stage3_complete", latency_ms=round(stage3_latency, 2), is_fallback=False, combined=needs_summary)
+            try:
+                if needs_summary:
+                    combined_prompt = _build_combined_prompt(prompt, context.conversation_summary)
+                    combined = await llm.generate_combined(combined_prompt)
+                    response_text = combined.get("response", "").strip()
+                    if not response_text:
+                        raise LLMException("Combined call returned empty response field")
+                    _summary = combined.get("summary")
+                    if _summary:
+                        new_summary = _summary[:500]
+                else:
+                    response_text = await llm.generate(prompt)
+                is_fallback = False
+                stage3_latency = (time.perf_counter() - stage3_start) * 1000
+                logger_struct.info("stage3_complete", latency_ms=round(stage3_latency, 2), is_fallback=False, combined=needs_summary)
 
-        except LLMException as e:
-            stage3_latency = (time.perf_counter() - stage3_start) * 1000
-            logger_struct.error("stage3_llm_failed", error=str(e), latency_ms=round(stage3_latency, 2))
-            if ENABLE_FALLBACK_RESPONSES:
-                response_text = get_fallback_response(context.phase)
-                is_fallback = True
-            else:
-                raise
+            except LLMException as e:
+                stage3_latency = (time.perf_counter() - stage3_start) * 1000
+                logger_struct.error("stage3_llm_failed", error=str(e), latency_ms=round(stage3_latency, 2))
+                if ENABLE_FALLBACK_RESPONSES:
+                    response_text = get_fallback_response(context.phase)
+                    is_fallback = True
+                else:
+                    raise
 
         # ===== STAGE 4: VALIDATE OUTPUT =====
         stage4_start = time.perf_counter()
