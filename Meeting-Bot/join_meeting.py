@@ -176,10 +176,7 @@ async def join_meeting_and_transcribe(
                 if "meet.google.com" not in url and url not in ("about:blank", ""):
                     msg = f"🚨 Page navigated away from Meet → {url} — bot was removed"
                     await push_log(msg)
-                    try:
-                        await page.evaluate("window.__stop_interview()")
-                    except Exception:
-                        pass
+                    await _safe_evaluate(page, "window.__stop_interview()", "__stop_interview")
                     if mongo_connected and db is not None:
                         try:
                             await db.interviews.update_one(
@@ -187,8 +184,8 @@ async def join_meeting_and_transcribe(
                                 {"$set": {"status": "abandoned", "ended_at": datetime.utcnow(),
                                           "abandon_reason": "host_removed_bot"}},
                             )
-                        except Exception:
-                            pass
+                        except Exception as mongo_err:
+                            await push_log(f"Failed to mark abandoned in MongoDB: {mongo_err}")
                     await set_bot_state(interview_id, "abandoned", db, mongo_connected)
 
             page.on('framenavigated', _on_page_navigated)
@@ -280,49 +277,52 @@ async def join_meeting_and_transcribe(
             await push_log(msg)
             await set_bot_state(interview_id, "waiting", db, mongo_connected)
             admitted = False
-            admission_start = asyncio.get_event_loop().time()
             admission_timeout = 120  # 2 minutes max for admission
 
-            for _ in range(600):
-                await page.wait_for_timeout(1000)
+            async def _wait_for_admission():
+                """Poll until admitted. Raises asyncio.TimeoutError if not admitted in time."""
+                while True:
+                    await page.wait_for_timeout(1000)
+                    try:
+                        leave_button = await page.locator('button[aria-label="Leave call"]').count()
+                        lobby_wait = await page.locator('text="Waiting for host"').count()
+                        lobby_wait_2 = await page.locator('text="Waiting for admission"').count()
 
-                try:
-                    leave_button = await page.locator('button[aria-label="Leave call"]').count()
-                    lobby_wait = await page.locator('text="Waiting for host"').count()
-                    lobby_wait_2 = await page.locator('text="Waiting for admission"').count()
+                        if leave_button > 0 and lobby_wait == 0 and lobby_wait_2 == 0:
+                            return  # Admitted
 
-                    if leave_button > 0 and lobby_wait == 0 and lobby_wait_2 == 0:
-                        admitted = True
-                        break
+                        body = await page.evaluate("() => document.body.innerText.toLowerCase()")
+                        if any(x in body for x in ["not found", "has ended", "denied", "removed from"]):
+                            msg = "❌ Denied or removed or meeting ended during wait"
+                            await push_log(msg)
+                            raise RuntimeError("meeting_ended_or_denied")
+                    except RuntimeError:
+                        raise
+                    except Exception:
+                        pass  # Transient page errors — keep polling
 
-                    body = await page.evaluate("() => document.body.innerText.toLowerCase()")
-                    if any(x in body for x in ["not found", "has ended", "denied", "removed from"]):
-                        msg = "❌ Denied or removed or meeting ended during wait"
-                        await push_log(msg)
-                        await ctx.close()
-                        return
-                except Exception:
-                    pass
-
-                elapsed = asyncio.get_event_loop().time() - admission_start
-                if elapsed > admission_timeout:
-                    msg = f"❌ Not admitted after {admission_timeout}s — stuck in lobby"
-                    await push_log(msg)
-
-                    if mongo_connected:
-                        await db.interviews.update_one(
-                            {"interview_id": interview_id},
-                            {"$set": {
-                                "status": "abandoned",
-                                "ended_at": datetime.utcnow(),
-                                "abandon_reason": f"lobby_timeout ({admission_timeout}s)"
-                            }}
-                        )
-                        msg = "✅ Marked as abandoned in MongoDB"
-                        await push_log(msg)
-                    await set_bot_state(interview_id, "abandoned", db, mongo_connected)
-                    await ctx.close()
-                    return
+            try:
+                await asyncio.wait_for(_wait_for_admission(), timeout=admission_timeout)
+                admitted = True
+            except asyncio.TimeoutError:
+                msg = f"❌ Not admitted after {admission_timeout}s — stuck in lobby"
+                await push_log(msg)
+                if mongo_connected:
+                    await db.interviews.update_one(
+                        {"interview_id": interview_id},
+                        {"$set": {
+                            "status": "abandoned",
+                            "ended_at": datetime.utcnow(),
+                            "abandon_reason": f"lobby_timeout ({admission_timeout}s)"
+                        }}
+                    )
+                await set_bot_state(interview_id, "abandoned", db, mongo_connected)
+                await ctx.close()
+                return
+            except RuntimeError:
+                await set_bot_state(interview_id, "abandoned", db, mongo_connected)
+                await ctx.close()
+                return
 
             msg = "✅ Admitted to meeting!"
             await push_log(msg)
@@ -390,7 +390,7 @@ async def join_meeting_and_transcribe(
             async def _monitor_stt_health():
                 """
                 Check every 10s that Web Speech API is running.
-                After 3 consecutive not-running checks (30s stalled), force-restart
+                After 2 consecutive not-running checks (20s stalled), force-restart
                 by calling window.__stt_restart() from Python.
                 """
                 not_running_streak = 0
@@ -410,8 +410,8 @@ async def join_meeting_and_transcribe(
 
                                 if not is_running and is_active:
                                     not_running_streak += 1
-                                    if not_running_streak >= 3:
-                                        # STT stalled for 30s — force restart
+                                    if not_running_streak >= 2:
+                                        # STT stalled for 20s — force restart
                                         msg = f"⚠️  STT stalled {not_running_streak * 10}s — force-restarting"
                                         await push_log(msg)
                                         try:
@@ -467,8 +467,15 @@ async def join_meeting_and_transcribe(
                                     stderr=asyncio.subprocess.PIPE,
                                 )
                                 await asyncio.wait_for(restart.communicate(), timeout=10)
-                                msg = "PulseAudio restart attempted"
+                                msg = "PulseAudio restart attempted — re-routing Chrome"
                                 await push_log(msg)
+                                # Chrome's WebRTC was connected to the old (gone) sink.
+                                # Re-route immediately so bot audio is audible again.
+                                try:
+                                    await setup_audio_routing_after_admission(page)
+                                    await push_log("Audio re-routed to VirtualSink after PulseAudio restart")
+                                except Exception as route_err:
+                                    await push_log(f"Audio re-route failed after PA restart: {route_err}")
                             except Exception as restart_err:
                                 msg = f"PulseAudio restart failed: {restart_err}"
                                 await push_log(msg)
@@ -517,6 +524,9 @@ async def join_meeting_and_transcribe(
 
             # Inactivity timeout
             INACTIVITY_TIMEOUT = 600
+            # Explicit holder avoids implicit closure ordering dependency (leave_task
+            # is defined 80 lines below _check_inactivity but referenced inside it).
+            _leave_task_holder: list = []
 
             async def _check_inactivity():
                 try:
@@ -540,8 +550,9 @@ async def join_meeting_and_transcribe(
                                     }}
                                 )
                             await set_bot_state(interview_id, "completed", db, mongo_connected)
-                            if leave_task and not leave_task.done():
-                                leave_task.cancel()
+                            _lt = _leave_task_holder[0] if _leave_task_holder else None
+                            if _lt and not _lt.done():
+                                _lt.cancel()
                             return
                 except asyncio.CancelledError:
                     pass
@@ -633,6 +644,7 @@ async def join_meeting_and_transcribe(
             leave_task = asyncio.create_task(
                 watch_for_leave(interview_id, page, db, mongo_connected)
             )
+            _leave_task_holder.append(leave_task)  # Expose to _check_inactivity closure
 
             # Wait for meeting to end
             try:

@@ -114,6 +114,12 @@ class TranscriptListener:
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, 30.0)  # exponential backoff, cap 30s
 
+    async def count_pending(self, interview_id: str) -> int:
+        """Count unplayed agent transcripts for this interview (for backpressure)."""
+        return await self.collection.count_documents(
+            {"interview_id": interview_id, "speaker": "agent", "audio_url": None}
+        )
+
     async def close(self) -> None:
         """Close change stream."""
         self._closed = True

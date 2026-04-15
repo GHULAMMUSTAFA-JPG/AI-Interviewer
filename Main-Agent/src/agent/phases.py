@@ -35,8 +35,8 @@ PHASE_CONFIG = {
         "objective": "Evaluate soft skills and cultural fit"
     },
     "CLOSING": {
-        "min_turns": 2,
-        "max_turns": 5,
+        "min_turns": 3,
+        "max_turns": 6,
         "next_phase": None,  # Last phase
         "objective": "Wrap up the interview and address candidate questions"
     }

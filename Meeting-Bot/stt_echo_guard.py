@@ -106,7 +106,8 @@ async def _watch_tts_status_redis(interview_id: str, status_state: dict, page):
             redis = await get_redis()
             pubsub = redis.pubsub()
             channel = f"tts:{interview_id}:status_events"
-            await pubsub.subscribe(channel)
+            cancel_channel = f"tts:{interview_id}:interrupt_cancel"
+            await pubsub.subscribe(channel, cancel_channel)
 
             retry_delay = 1.0
             msg = f"Echo guard: subscribed to Redis channel {channel}"
@@ -137,6 +138,21 @@ async def _watch_tts_status_redis(interview_id: str, status_state: dict, page):
                 if message["type"] != "message":
                     continue
                 try:
+                    msg_channel = message.get("channel", b"")
+                    if isinstance(msg_channel, bytes):
+                        msg_channel = msg_channel.decode()
+
+                    # P6: interrupt_cancel — TTS confirmed noise, not real speech.
+                    # Discard words buffered during the false-positive window.
+                    if msg_channel == cancel_channel:
+                        await _safe_evaluate(
+                            page,
+                            "window.__clear_interrupt_accumulation && window.__clear_interrupt_accumulation()",
+                            "__clear_interrupt_accumulation"
+                        )
+                        await push_log("Echo guard: interrupt_cancel received — cleared accumulation buffer")
+                        continue
+
                     data = json.loads(message["data"])
                     status = data.get("status")  # "speaking" or "idle"
                     is_speaking = status == "speaking"

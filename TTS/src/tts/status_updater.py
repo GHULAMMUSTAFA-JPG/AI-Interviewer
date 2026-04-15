@@ -46,8 +46,14 @@ class TranscriptUpdater:
         else:
             audio_url = "played"
 
+        update = {"audio_url": audio_url}
+        if audio_data:
+            # Store length for cache integrity check — detects partial saves
+            # from interrupted mid-synthesis writes.
+            update["audio_length_bytes"] = len(audio_data)
+
         await self.collection.update_one(
             {"_id": document_id},
-            {"$set": {"audio_url": audio_url}},
+            {"$set": update},
         )
         logger.info(f"Transcript updated: {document_id} → audio_url={audio_url}")

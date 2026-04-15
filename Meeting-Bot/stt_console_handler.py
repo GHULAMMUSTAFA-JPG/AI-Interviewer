@@ -32,6 +32,8 @@ async def create_console_handler(page, interview_id: str, status_state: dict,
     """
     _request_id = 0
     _interrupt_signal_pending = False  # True while optimistic countdown is active
+    _low_conf_window_start = 0.0       # Start of 60s low-confidence tracking window
+    _low_conf_count = 0                # Low-confidence finals in current window
 
     def _new_request_id():
         nonlocal _request_id
@@ -166,10 +168,33 @@ async def create_console_handler(page, interview_id: str, status_state: dict,
                     await push_log(msg_log)
                 return
 
-            # ─── STT Errors ────────────────────────────────────────
-            if text.startswith('STT_ERROR:') or text.startswith('STT_LOW_CONF:'):
-                msg_log = f"[STT] {text[:200]}"
-                await push_log(msg_log)
+            # ─── STT Errors / Low Confidence ─────────────────────
+            if text.startswith('STT_ERROR:'):
+                await push_log(f"[STT ERROR] {text[:200]}")
+                return
+
+            if text.startswith('STT_LOW_CONF:'):
+                await push_log(f"[STT LOW CONF] {text[:200]}")
+                nonlocal _low_conf_window_start, _low_conf_count
+                now = time.time()
+                if now - _low_conf_window_start > 60:
+                    _low_conf_window_start = now
+                    _low_conf_count = 0
+                _low_conf_count += 1
+                if _low_conf_count > 10 and redis and mongo_connected and db is not None:
+                    try:
+                        await db.interviews.update_one(
+                            {"interview_id": interview_id},
+                            {"$set": {"audio_quality_warning": True,
+                                      "audio_quality_warning_at": now}}
+                        )
+                        await push_log(
+                            f"[AUDIO WARNING] {_low_conf_count} low-confidence finals in 60s — "
+                            "candidate audio quality degraded"
+                        )
+                        _low_conf_count = 0  # Reset to avoid repeated writes
+                    except Exception:
+                        pass
 
         except Exception as e:
             print(f"Console handler error: {e}")

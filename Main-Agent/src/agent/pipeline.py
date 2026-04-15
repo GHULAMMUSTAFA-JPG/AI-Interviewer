@@ -330,28 +330,32 @@ async def process_candidate_message(
             update_doc
         )
 
-        # Generate final evaluation if interview completed
+        # Fire-and-forget evaluation — runs outside the pipeline lock so it doesn't
+        # block the response from being sent. Takes 5-15s and doesn't affect turn flow.
         if interview_ended:
-            logger.info(f"Interview completed - generating evaluation")
-            all_messages = await db.transcripts.find(
-                {"interview_id": context.interview_id}
-            ).sort("timestamp", 1).to_list(length=None)
+            logger.info(f"Interview completed — scheduling async evaluation")
 
-            evaluation = await generate_evaluation(
-                context.candidate_cv,
-                context.job_description,
-                context.company_info,
-                new_summary,
-                all_messages
-            )
+            async def _run_evaluation():
+                try:
+                    all_messages = await db.transcripts.find(
+                        {"interview_id": context.interview_id}
+                    ).sort("timestamp", 1).to_list(length=None)
+                    evaluation = await generate_evaluation(
+                        context.candidate_cv,
+                        context.job_description,
+                        context.company_info,
+                        new_summary,
+                        all_messages
+                    )
+                    await db.interviews.update_one(
+                        {"interview_id": context.interview_id},
+                        {"$set": {"evaluation": evaluation}}
+                    )
+                    logger.info(f"Evaluation complete: {evaluation['recommendation']} (score: {evaluation['score']})")
+                except Exception as eval_err:
+                    logger.error(f"Evaluation failed (non-fatal): {eval_err}")
 
-            # Store evaluation in interview document
-            await db.interviews.update_one(
-                {"interview_id": context.interview_id},
-                {"$set": {"evaluation": evaluation}}
-            )
-
-            logger.info(f"Evaluation complete: {evaluation['recommendation']} (score: {evaluation['score']})")
+            asyncio.create_task(_run_evaluation())
 
         # Mark agent as idle and write phase/turn to Redis for UI live view
         await _set_agent_status(context.interview_id, "idle")

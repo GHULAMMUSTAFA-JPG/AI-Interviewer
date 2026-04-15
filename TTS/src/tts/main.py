@@ -55,6 +55,14 @@ class TTSService:
             if not self._running:
                 break
             await self._process_transcript(doc)
+            # Backpressure: if more agent transcripts are queued for same interview,
+            # pause 1s between them. Back-to-back messages with no gap sounds unnatural.
+            try:
+                pending = await self._transcript_listener.count_pending(doc.interview_id)
+                if pending > 0:
+                    await asyncio.sleep(1.0)
+            except Exception:
+                pass  # Never block on backpressure check
 
     @staticmethod
     async def _buffered(source, buffer: list):
@@ -154,18 +162,31 @@ class TTSService:
 
         try:
             if doc.audio_data:
-                # --- Cache hit: play from DB, no ElevenLabs call ---
-                logger.info(
-                    f"Playing from DB cache: {doc.id} "
-                    f"({len(doc.audio_data) / 1024:.1f} KB)"
-                )
-                await self._player.play(
-                    self._chunks_from_bytes(doc.audio_data),
-                    self._interrupt_handler.stop_event,
-                )
-                await self._transcript_updater.mark_played(doc.id, doc.audio_data)
-            else:
-                # --- Cache miss: synthesize from ElevenLabs ---
+                # --- Cache hit: integrity check then play ---
+                # A partial audio save (interrupted mid-synthesis) would produce
+                # corrupted PCM. Verify length matches stored metadata before playing.
+                expected_len = getattr(doc, "audio_length_bytes", None)
+                actual_len = len(doc.audio_data)
+                cache_valid = expected_len is None or actual_len == expected_len
+                if not cache_valid:
+                    logger.warning(
+                        f"Cache integrity mismatch for {doc.id}: "
+                        f"expected {expected_len}B, got {actual_len}B — re-synthesizing"
+                    )
+
+                if doc.audio_data and cache_valid:
+                    logger.info(
+                        f"Playing from DB cache: {doc.id} "
+                        f"({actual_len / 1024:.1f} KB)"
+                    )
+                    await self._player.play(
+                        self._chunks_from_bytes(doc.audio_data),
+                        self._interrupt_handler.stop_event,
+                    )
+                    await self._transcript_updater.mark_played(doc.id, doc.audio_data)
+
+            if not doc.audio_data or not cache_valid:
+                # --- Cache miss (or corrupted cache): synthesize from ElevenLabs ---
                 audio_buffer: list[bytes] = []
 
                 # Wrap synthesis + playback in a 60-second timeout

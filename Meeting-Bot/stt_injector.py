@@ -8,7 +8,8 @@ SPEECH_INJECTION_SCRIPT = """
 
     // ─── State ───────────────────────────────────────────────────
     let transcript           = "";     // Accumulated confirmed finals (cleared each bot turn)
-    let isBotSpeaking        = false;  // Hard gate: true = discard everything
+    let botSpeakingCount     = 0;      // Counter: >0 means bot is speaking (handles rapid starts)
+    let isBotSpeaking        = false;  // Derived: true when botSpeakingCount > 0
     let botStoppedAt         = 0;      // Timestamp when bot stopped (for echo time gate)
     let silenceTimer         = null;   // Fires VAD_SILENCE_MS after last final → save
     let maxDurTimer          = null;   // Fires MAX_SPEECH_MS after speech starts → force-save
@@ -110,7 +111,11 @@ SPEECH_INJECTION_SCRIPT = """
 
     // ─── Bot gates (Python calls these via page.evaluate) ────────
     window.__tts_started = function() {
-        isBotSpeaking = true;
+        // Counter approach: handles two rapid __tts_started() calls (queued agent messages).
+        // Old boolean would make the second call a no-op — then __tts_ended() for the first
+        // would clear the gate while the second message is still playing.
+        botSpeakingCount++;
+        isBotSpeaking = (botSpeakingCount > 0);
         _clearInterruptState();
         _clearTimers();
         transcript = "";
@@ -118,11 +123,13 @@ SPEECH_INJECTION_SCRIPT = """
     };
 
     window.__tts_ended = function(wasInterrupted) {
-        isBotSpeaking = false;
+        // Decrement counter — gate only clears when all queued messages finish.
+        botSpeakingCount = Math.max(0, botSpeakingCount - 1);
+        isBotSpeaking = (botSpeakingCount > 0);
+        if (isBotSpeaking) return;  // More messages queued — keep gate active
+
         _clearInterruptState();
-        // Echo gate: Google STT queue still has 1-2s of bot audio in flight —
-        // always run the full echo gate regardless of interrupt, to prevent
-        // the bot's own voice from leaking through as candidate speech.
+        // Echo gate: Google STT queue still has 1-2s of bot audio in flight.
         botStoppedAt = Date.now();
 
         // On natural end, clear everything for a fresh start.
@@ -132,19 +139,27 @@ SPEECH_INJECTION_SCRIPT = """
             transcript = "";
         }
 
-        // FIX: Reset backoff so TTS restarts don't compound delays.
-        // Without this, repeated stop/start cycles grow restartBackoff to 16s,
-        // creating 16-second gaps where NO speech is captured.
-        restartBackoff = 1500;
+        // Use 300ms restart delay when interrupted — candidate is actively speaking.
+        // Use 1500ms on natural end — prevents echo from immediately being captured.
+        const restartDelay = wasInterrupted ? 300 : 1500;
+        restartBackoff = restartDelay;
 
         emit("TTS_ENDED:");
-        // Force a fresh recognition session to clear any throttled/aborted state
-        // that accumulated while recognition was running during isBotSpeaking=true.
+        // Force a fresh recognition session to clear any throttled/aborted state.
         if (recognition && isRunning) {
-            recognition.stop();   // onend fires → scheduleRestart(restartBackoff=1500)
+            recognition.stop();   // onend fires → scheduleRestart(restartBackoff)
         } else if (!isRunning && interviewActive) {
-            scheduleRestart(300);
+            scheduleRestart(restartDelay);
         }
+    };
+
+    window.__clear_interrupt_accumulation = function() {
+        // Called by Python on interrupt_cancel (noise confirmed, not real speech).
+        // Discards words buffered during the false-positive window so phantom
+        // transcripts don't reach the LLM pipeline.
+        transcript = "";
+        _clearTimers();
+        emit("STT_INTERRUPT_ACCUMULATION_CLEARED:");
     };
 
     window.__stop_interview = function() {
