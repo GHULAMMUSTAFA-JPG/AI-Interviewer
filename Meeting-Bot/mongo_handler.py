@@ -4,6 +4,7 @@ Writes candidate captions to interviews.transcripts only.
 This collection is the shared event bus between all services.
 """
 
+import asyncio
 import os
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorGridFSBucket
 from pymongo.errors import ServerSelectionTimeoutError
@@ -19,6 +20,37 @@ DB_NAME = "interviews"
 
 client = None
 db = None
+
+# 9.1: asyncio.Queue fallback — failed inserts queue here and retry in background.
+# Prevents candidate speech from being lost during MongoDB blips (replica elections).
+_fallback_queue: asyncio.Queue = asyncio.Queue()
+_retry_task: asyncio.Task | None = None
+
+
+async def start_fallback_retry_task() -> None:
+    """Start the background retry task. Call once at service startup."""
+    global _retry_task
+    if _retry_task is None or _retry_task.done():
+        _retry_task = asyncio.create_task(_retry_failed_inserts())
+
+
+async def _retry_failed_inserts() -> None:
+    """Background task: retry queued inserts with exponential backoff up to 5 minutes."""
+    while True:
+        doc = await _fallback_queue.get()
+        delay = 1.0
+        max_delay = 300.0
+        while True:
+            if db is not None:
+                try:
+                    await db["transcripts"].insert_one(doc.copy())
+                    await push_log(f"[FALLBACK] Queued transcript recovered: {doc.get('interview_id')}")
+                    break
+                except Exception as e:
+                    await push_log(f"[FALLBACK] Retry failed (next in {delay:.0f}s): {e}")
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, max_delay)
+        _fallback_queue.task_done()
 
 
 async def connect_to_mongo() -> bool:
@@ -98,14 +130,17 @@ async def insert_transcript(interview_id: str, speaker: str, text: str) -> bool:
 
     for attempt in range(1, 4):
         try:
-            result = await db["transcripts"].insert_one(doc)
+            result = await db["transcripts"].insert_one(doc.copy())
             msg = f"Transcript inserted (id={result.inserted_id})"
             await push_log(msg)
             return True
         except Exception as e:
             if attempt == 3:
-                msg = f"Transcript insert FAILED after 3 attempts: {e}"
+                msg = f"Transcript insert FAILED after 3 attempts — queuing for retry: {e}"
                 await push_log(msg)
+                # 9.1: Queue for background retry instead of silently losing data
+                await _fallback_queue.put(doc)
+                await start_fallback_retry_task()
                 return False
             msg = f"Transcript insert error (attempt {attempt}/3), retrying in 1s: {e}"
             await push_log(msg)

@@ -334,9 +334,14 @@ async def join_meeting_and_transcribe(
             # 2. Web Speech API → BotMic (meeting audio from others)
             # ════════════════════════════════════════════════════════════
 
-            msg = "⏳ Waiting 2 seconds for audio to stabilize..."
-            await push_log(msg)
-            await page.wait_for_timeout(2000)
+            # 8.2: Poll VirtualSink readiness instead of fixed 2s sleep.
+            # Waits until Chrome sink-input exists on VirtualSink (up to 5s, 200ms poll).
+            from stt_audio_router import poll_virtualsink_ready
+            ready = await poll_virtualsink_ready(timeout=5.0, interval=0.2)
+            if ready:
+                await push_log("⏳ VirtualSink ready — routing Chrome audio")
+            else:
+                await push_log("⏳ VirtualSink not confirmed in 5s — proceeding anyway")
 
             # Route Chrome output → VirtualSink, switch default source → BotMic,
             # verify Chrome mic source-output is on virtual_mic_source
@@ -414,6 +419,15 @@ async def join_meeting_and_transcribe(
                                         # STT stalled for 20s — force restart
                                         msg = f"⚠️  STT stalled {not_running_streak * 10}s — force-restarting"
                                         await push_log(msg)
+                                        # 10.3: Write degraded flag so UI can alert operator
+                                        if mongo_connected and db is not None:
+                                            try:
+                                                await db.interviews.update_one(
+                                                    {"interview_id": interview_id},
+                                                    {"$set": {"degraded": True, "degraded_reason": "stt_stall"}}
+                                                )
+                                            except Exception:
+                                                pass
                                         try:
                                             await page.evaluate("window.__stt_restart()")
                                             not_running_streak = 0
@@ -460,6 +474,15 @@ async def join_meeting_and_transcribe(
                                 await state.set_bot_status(interview_id, "audio_error")
                             except Exception:
                                 pass
+                            # 10.3: Mark interview degraded
+                            if mongo_connected and db is not None:
+                                try:
+                                    await db.interviews.update_one(
+                                        {"interview_id": interview_id},
+                                        {"$set": {"degraded": True, "degraded_reason": "pulseaudio_crash"}}
+                                    )
+                                except Exception:
+                                    pass
                             try:
                                 restart = await asyncio.create_subprocess_exec(
                                     "pulseaudio", "--start",

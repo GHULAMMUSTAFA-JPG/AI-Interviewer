@@ -69,8 +69,24 @@ async def _set_agent_status(interview_id: str, status: str) -> None:
         pass  # Redis unavailable — degrade silently
 
 
-def _build_combined_prompt(interview_prompt: str, current_summary: str) -> str:
-    """Append a summary-update request to the interview prompt for a combined JSON response."""
+def _build_combined_prompt(interview_prompt: str, current_summary: str,
+                            phase: str = "", phase_turn_count: int = 0,
+                            min_turns: int = 0) -> str:
+    """Append a summary-update request to the interview prompt for a combined JSON response.
+
+    Also requests ready_to_advance (6.1) and candidate_finished (6.3) signals.
+    """
+    advance_hint = (
+        f"\nready_to_advance: true if the candidate has provided enough substance to move to "
+        f"the next phase (phase={phase}, turns_in_phase={phase_turn_count}/{min_turns}+). "
+        "false if they need more probing."
+    )
+    finished_hint = (
+        "\ncandidate_finished: true only if the candidate has clearly wrapped up "
+        "(said goodbye, thanked you, or explicitly indicated they're done). "
+        "false otherwise."
+        if phase == "CLOSING" else ""
+    )
     return (
         f"{interview_prompt}\n\n"
         "---\n"
@@ -78,7 +94,10 @@ def _build_combined_prompt(interview_prompt: str, current_summary: str) -> str:
         f"Current summary: {current_summary or '(none)'}\n\n"
         "Respond ONLY with valid JSON (no markdown fences):\n"
         '{"response": "<your interview question or statement>", '
-        '"summary": "<updated running summary max 500 chars>"}'
+        '"summary": "<updated running summary max 500 chars>", '
+        '"ready_to_advance": <true|false>, '
+        '"candidate_finished": <true|false>}'
+        f"\n{advance_hint}{finished_hint}"
     )
 
 
@@ -185,6 +204,28 @@ async def process_candidate_message(
         stage2_start = time.perf_counter()
         logger_struct.info("stage2_building_prompt", phase=context.phase)
         prompt = build_prompt(context)
+
+        # P5: Candidate comfort signal — if audio quality is degraded, append
+        # a one-line instruction so the LLM naturally asks them to repeat.
+        try:
+            interview_doc = await db.interviews.find_one(
+                {"interview_id": context.interview_id},
+                {"audio_quality_warning": 1, "_id": 0}
+            )
+            if interview_doc and interview_doc.get("audio_quality_warning"):
+                prompt += (
+                    "\n\n[SYSTEM NOTE: Audio quality from the candidate has been poor. "
+                    "Gently ask them to move closer to their microphone or repeat their "
+                    "last point before continuing. Do this naturally within your response.]\n"
+                )
+                # Clear warning so it doesn't repeat every turn
+                await db.interviews.update_one(
+                    {"interview_id": context.interview_id},
+                    {"$unset": {"audio_quality_warning": ""}}
+                )
+        except Exception:
+            pass
+
         stage2_latency = (time.perf_counter() - stage2_start) * 1000
         logger_struct.debug("stage2_complete", latency_ms=round(stage2_latency, 2))
 
@@ -199,9 +240,21 @@ async def process_candidate_message(
             logger_struct.info("stage3_calling_llm", provider=Config.LLM_PROVIDER, combined=needs_summary)
             llm = get_llm_provider()
 
+            # Phase config for combined prompt hints
+            from src.agent.phases import PHASE_CONFIG
+            _phase_cfg = PHASE_CONFIG.get(context.phase, {})
+            ready_to_advance_signal: bool | None = None
+            candidate_finished_signal: bool | None = None
+
             try:
                 if needs_summary:
-                    combined_prompt = _build_combined_prompt(prompt, context.conversation_summary)
+                    combined_prompt = _build_combined_prompt(
+                        prompt,
+                        context.conversation_summary,
+                        phase=context.phase,
+                        phase_turn_count=context.phase_turn_count if hasattr(context, 'phase_turn_count') else 0,
+                        min_turns=_phase_cfg.get("min_turns", 0),
+                    )
                     combined = await llm.generate_combined(combined_prompt)
                     response_text = combined.get("response", "").strip()
                     if not response_text:
@@ -209,6 +262,9 @@ async def process_candidate_message(
                     _summary = combined.get("summary")
                     if _summary:
                         new_summary = _summary[:500]
+                    # 6.1/6.3: extract LLM signals
+                    ready_to_advance_signal = combined.get("ready_to_advance")
+                    candidate_finished_signal = combined.get("candidate_finished")
                 else:
                     response_text = await llm.generate(prompt)
                 is_fallback = False
@@ -295,7 +351,8 @@ async def process_candidate_message(
         should_advance, advance_reason = should_advance_phase(
             context.phase,
             phase_turn_count,
-            new_turn_count
+            new_turn_count,
+            ready_to_advance=ready_to_advance_signal,
         )
 
         new_phase = context.phase
@@ -306,8 +363,10 @@ async def process_candidate_message(
                 phase_turn_count = 0  # Reset for new phase
                 logger.info(f"Phase transition: {context.phase} -> {new_phase}")
 
-        # Check if interview should end
-        interview_ended = should_end_interview(new_phase, phase_turn_count)
+        # Check if interview should end (6.3: requires candidate_finished signal)
+        interview_ended = should_end_interview(
+            new_phase, phase_turn_count, candidate_finished=candidate_finished_signal
+        )
         new_status = "completed" if interview_ended else "in_progress"
 
         # Update interview state

@@ -58,6 +58,7 @@ SPEECH_INJECTION_SCRIPT = """
     // Default matches VAD_SILENCE_MS. CLOSING=2500ms, TECHNICAL=5000ms, others=4000ms.
     let VAD_SILENCE_MS_dynamic = VAD_SILENCE_MS;
     const ECHO_GATE_MS         = 700;   // ms to ignore STT after bot stops (Google STT queue drains in ~300-500ms)
+    let echoGateMs             = ECHO_GATE_MS;  // Dynamic: TTS sets this per-utterance via window.__set_echo_gate
     const MAX_SPEECH_MS        = 45000; // ms — force-save when onspeechend never fires (technical answers exceed 25s)
     const MIN_CONFIDENCE       = 0.55;  // discard finals below this; 0 = not reported → keep
     const MIN_WORDS            = 2;     // discard saves shorter than this (noise artifacts)
@@ -153,6 +154,14 @@ SPEECH_INJECTION_SCRIPT = """
         }
     };
 
+    window.__set_echo_gate = function(ms) {
+        // TTS calls this with actual audio duration so echo gate matches real playback.
+        // Prevents bot words from leaking as candidate speech after long responses.
+        // Cap at 1500ms — longer creates too much dead-zone for short responses.
+        echoGateMs = Math.min(Math.max(ms, ECHO_GATE_MS), 1500);
+        emit("ECHO_GATE_SET:", echoGateMs);
+    };
+
     window.__clear_interrupt_accumulation = function() {
         // Called by Python on interrupt_cancel (noise confirmed, not real speech).
         // Discards words buffered during the false-positive window so phantom
@@ -200,7 +209,7 @@ SPEECH_INJECTION_SCRIPT = """
         // delivers ≥1 word, the interrupt is confirmed. If the window expires with no
         // onresult, it was noise — bot continues speaking.
         r.onspeechstart = function() {
-            if (Date.now() - botStoppedAt < ECHO_GATE_MS && !isBotSpeaking) return;
+            if (Date.now() - botStoppedAt < echoGateMs && !isBotSpeaking) return;
 
             if (isBotSpeaking) {
                 // Start confirmation window if not already waiting
@@ -253,7 +262,7 @@ SPEECH_INJECTION_SCRIPT = """
             }
 
             // Time gate: too soon after bot stopped — Google STT queue still has bot audio
-            if (Date.now() - botStoppedAt < ECHO_GATE_MS) return;
+            if (Date.now() - botStoppedAt < echoGateMs) return;
 
             let gotFinal = false;
             for (let i = event.resultIndex; i < event.results.length; i++) {

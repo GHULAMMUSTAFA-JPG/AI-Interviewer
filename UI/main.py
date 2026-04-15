@@ -16,8 +16,10 @@ from datetime import datetime
 import pdfplumber
 import docx
 
+import asyncio
+import json
 from fastapi import FastAPI, Request, Form, UploadFile, File, HTTPException, Path
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -217,6 +219,83 @@ async def interview_status(interview_id: str = Path(...)):
             print(f"⚠️  Redis status error for {interview_id}: {redis_err}")
 
     return JSONResponse(result)
+
+
+@app.get("/status/{interview_id}/stream")
+async def interview_status_stream(interview_id: str = Path(...)):
+    """P4: SSE endpoint — streams live interview state updates every 2s.
+
+    Client usage:
+        const es = new EventSource(`/status/${id}/stream`);
+        es.onmessage = e => { const state = JSON.parse(e.data); ... };
+
+    Sends 'done' event when interview completes or is abandoned.
+    """
+    db = _get_db()
+
+    async def _generate():
+        last_state: dict = {}
+        while True:
+            try:
+                mongo_doc = await db["interviews"].find_one(
+                    {"interview_id": interview_id},
+                    {"status": 1, "bot_status": 1, "phase": 1, "turn_count": 1,
+                     "audio_quality_warning": 1, "degraded": 1, "_id": 0},
+                )
+                if not mongo_doc:
+                    yield "event: error\ndata: {\"error\": \"not_found\"}\n\n"
+                    return
+
+                result = {
+                    "status":       mongo_doc.get("status", "unknown"),
+                    "bot_status":   mongo_doc.get("bot_status", "pending"),
+                    "phase":        mongo_doc.get("phase", "INTRO"),
+                    "turn_count":   mongo_doc.get("turn_count", 0),
+                    "agent_status": "idle",
+                    "tts_status":   "idle",
+                    "degraded":     mongo_doc.get("degraded", False),
+                    "audio_quality_warning": mongo_doc.get("audio_quality_warning", False),
+                }
+
+                try:
+                    redis = await get_redis()
+                    state_r = await redis.hgetall(f"interview:{interview_id}:state")
+                    if state_r:
+                        if state_r.get("phase"):
+                            result["phase"] = state_r["phase"]
+                        if state_r.get("turn_count"):
+                            result["turn_count"] = int(state_r["turn_count"])
+                    agent_r = await redis.hgetall(f"agent:{interview_id}:status")
+                    if agent_r and agent_r.get("status"):
+                        result["agent_status"] = agent_r["status"]
+                    tts_r = await redis.hgetall(f"tts:{interview_id}:status")
+                    if tts_r and tts_r.get("status"):
+                        result["tts_status"] = tts_r["status"]
+                except Exception:
+                    pass
+
+                # Only send when state changes
+                if result != last_state:
+                    last_state = result.copy()
+                    yield f"data: {json.dumps(result)}\n\n"
+
+                if result["status"] in ("completed", "abandoned"):
+                    yield "event: done\ndata: {}\n\n"
+                    return
+
+            except Exception as e:
+                yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+
+            await asyncio.sleep(2)
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/logs", response_class=HTMLResponse)

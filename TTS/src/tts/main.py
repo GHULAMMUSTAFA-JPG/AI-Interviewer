@@ -99,6 +99,32 @@ class TTSService:
         except Exception:
             pass
 
+    async def _wait_for_guard_ready(self, interview_id: str, timeout: float = 0.5) -> bool:
+        """Wait for echo guard to publish guard_ready (confirms __tts_started() called).
+
+        Returns True if guard_ready received, False on timeout.
+        Falls back gracefully if Redis is unavailable.
+        """
+        try:
+            from .redis_client import get_redis
+            redis = await get_redis()
+            # Publish arm_ready so echo guard knows to send guard_ready
+            await redis.publish(f"tts:{interview_id}:arm_ready", "1")
+            # Wait for guard_ready with timeout
+            pubsub = redis.pubsub()
+            await pubsub.subscribe(f"tts:{interview_id}:guard_ready")
+            try:
+                async def _listen():
+                    async for msg in pubsub.listen():
+                        if msg["type"] == "message":
+                            return True
+                    return False
+                return await asyncio.wait_for(_listen(), timeout=timeout)
+            finally:
+                await pubsub.unsubscribe(f"tts:{interview_id}:guard_ready")
+        except Exception:
+            return False  # Redis unavailable — proceed without handshake
+
     async def _process_transcript(self, doc: TranscriptDocument) -> None:
         """Synthesize (or replay from DB cache), play, and save audio.
 
@@ -116,17 +142,32 @@ class TTSService:
         # Arm: mark bot as speaking, clear stale interrupt, start watching.
         await self._interrupt_handler.arm(doc.interview_id)
 
-        # Two-purpose sleep:
-        # 1. Echo guard: arm() sets bot_speaking=True in MongoDB, but Meeting-Bot's
-        #    change stream needs ~100-400ms to propagate to __tts_started() in the
-        #    browser. Without this, the bot's first words play while STT is still
-        #    active and get transcribed as candidate speech.
-        # 2. Stale buffer: any candidate T2 that escaped the pipeline stale check
-        #    (saved within 275ms of this agent response) is in MongoDB by 600ms.
-        #    The stale check below runs after this sleep to catch those.
-        # Reduced from 0.6s to 0.3s — echo guard is sufficient and the stale check
-        # benefits from running earlier to catch more stale candidates.
-        await asyncio.sleep(0.3)
+        # 2.2: Publish estimated audio duration so echo guard can set dynamic echo gate.
+        # Edge TTS s16le 22050Hz mono → ~44100 bytes/sec. Estimate from text length.
+        # Rough heuristic: ~5 chars/word, ~150 words/min → ~12.5ms per char.
+        # Capped at 1500ms per the spec — matches JS __set_echo_gate cap.
+        estimated_audio_ms = min(int(len(doc.text) * 12.5), 1500)
+        try:
+            from .redis_client import get_redis as _get_redis
+            _redis = await _get_redis()
+            await _redis.setex(
+                f"tts:{doc.interview_id}:audio_duration_ms",
+                30,  # 30s TTL — only relevant during this utterance
+                str(estimated_audio_ms)
+            )
+        except Exception:
+            pass
+
+        # 4.1: arm/guard handshake — wait for echo guard to confirm __tts_started()
+        # has been called in the browser before we play audio. Replaces guessed 0.3s sleep.
+        # Echo guard publishes tts:{id}:guard_ready after __tts_started() succeeds.
+        # Timeout 500ms: if guard_ready never arrives, proceed anyway (no regression).
+        guard_ready = await self._wait_for_guard_ready(doc.interview_id, timeout=0.5)
+        if not guard_ready:
+            logger.debug(
+                f"guard_ready timeout (proceeding): interview={doc.interview_id} — "
+                f"echo guard may not be active"
+            )
 
         # STALE CHECK (Position 2 gap):
         # If the candidate spoke again between the pipeline saving this response and

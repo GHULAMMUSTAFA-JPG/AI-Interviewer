@@ -277,6 +277,7 @@ async def create_audio_router():
     async def _maintain_audio_routing():
         import time as _time
         start = _time.monotonic()
+        last_routing_log = 0.0
         try:
             while True:
                 elapsed = _time.monotonic() - start
@@ -292,6 +293,12 @@ async def create_audio_router():
                 if fixed > 0:
                     msg = f"Audio routing: fixed {fixed} drifted source-output(s)"
                     await push_log(msg)
+
+                # 8.3: Log routing state every 60s — detects silent Chrome drift
+                now = _time.monotonic()
+                if now - last_routing_log >= 60:
+                    last_routing_log = now
+                    await _log_routing_state()
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -299,6 +306,78 @@ async def create_audio_router():
             await push_log(msg)
 
     return asyncio.create_task(_maintain_audio_routing())
+
+
+async def _log_routing_state() -> None:
+    """Log current sink-input assignments every 60s. Flags Chrome not on VirtualSink."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "pactl", "list", "sink-inputs",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        output = stdout.decode()
+
+        current_id = current_app = current_sink = None
+        issues = []
+        ok_count = 0
+        for line in output.splitlines():
+            line = line.strip()
+            if line.startswith("Sink Input #"):
+                if current_id and current_app and "pacat" not in (current_app or "").lower():
+                    if current_sink and "VirtualSink" not in current_sink:
+                        issues.append(f"  #{current_id} ({current_app}) → {current_sink} [NOT VirtualSink]")
+                    else:
+                        ok_count += 1
+                current_id = line.split("#")[1].strip()
+                current_app = current_sink = None
+            elif "application.name" in line and "=" in line:
+                current_app = line.split("=", 1)[1].strip().strip('"')
+            elif line.startswith("Sink:"):
+                current_sink = line.split(":", 1)[1].strip()
+
+        if issues:
+            await push_log(f"[ROUTING] Chrome output drift detected:\n" + "\n".join(issues))
+        else:
+            await push_log(f"[ROUTING] OK — {ok_count} Chrome sink-input(s) on VirtualSink")
+    except Exception as e:
+        await push_log(f"[ROUTING] State log failed (non-fatal): {e}")
+
+
+async def poll_virtualsink_ready(timeout: float = 5.0, interval: float = 0.2) -> bool:
+    """Poll until a Chrome sink-input exists on VirtualSink (8.2: replaces 2s fixed sleep).
+
+    Returns True when ready, False on timeout.
+    """
+    import time as _time
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "pactl", "list", "sink-inputs",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+            output = stdout.decode()
+            # A Chrome sink-input routed to VirtualSink means routing is live
+            current_app = current_sink = None
+            for line in output.splitlines():
+                line = line.strip()
+                if line.startswith("Sink Input #"):
+                    current_app = current_sink = None
+                elif "application.name" in line and "=" in line:
+                    current_app = line.split("=", 1)[1].strip().strip('"')
+                elif line.startswith("Sink:"):
+                    current_sink = line.split(":", 1)[1].strip()
+                    if (current_app and "pacat" not in current_app.lower()
+                            and current_sink and "VirtualSink" in current_sink):
+                        return True
+        except Exception:
+            pass
+        await asyncio.sleep(interval)
+    return False
 
 
 # Export for initial setup

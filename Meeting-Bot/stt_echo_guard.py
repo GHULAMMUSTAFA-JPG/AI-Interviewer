@@ -107,7 +107,9 @@ async def _watch_tts_status_redis(interview_id: str, status_state: dict, page):
             pubsub = redis.pubsub()
             channel = f"tts:{interview_id}:status_events"
             cancel_channel = f"tts:{interview_id}:interrupt_cancel"
-            await pubsub.subscribe(channel, cancel_channel)
+            arm_ready_channel = f"tts:{interview_id}:arm_ready"
+            guard_ready_channel = f"tts:{interview_id}:guard_ready"
+            await pubsub.subscribe(channel, cancel_channel, arm_ready_channel)
 
             retry_delay = 1.0
             msg = f"Echo guard: subscribed to Redis channel {channel}"
@@ -141,6 +143,28 @@ async def _watch_tts_status_redis(interview_id: str, status_state: dict, page):
                     msg_channel = message.get("channel", b"")
                     if isinstance(msg_channel, bytes):
                         msg_channel = msg_channel.decode()
+
+                    # 4.1: arm_ready — TTS just armed; call __tts_started() and publish guard_ready
+                    if msg_channel == arm_ready_channel:
+                        # 2.2: Set dynamic echo gate from TTS-published audio duration
+                        try:
+                            dur_bytes = await redis.get(f"tts:{interview_id}:audio_duration_ms")
+                            if dur_bytes:
+                                dur_ms = int(dur_bytes.decode())
+                                await _safe_evaluate(
+                                    page,
+                                    f"window.__set_echo_gate && window.__set_echo_gate({dur_ms})",
+                                    "__set_echo_gate"
+                                )
+                        except Exception:
+                            pass
+                        await _safe_evaluate(page, "window.__tts_started()", "__tts_started (arm_ready)")
+                        try:
+                            await redis.publish(guard_ready_channel, "1")
+                        except Exception:
+                            pass
+                        await push_log("Echo guard: arm_ready → echo gate set, __tts_started() called, guard_ready published")
+                        continue
 
                     # P6: interrupt_cancel — TTS confirmed noise, not real speech.
                     # Discard words buffered during the false-positive window.
