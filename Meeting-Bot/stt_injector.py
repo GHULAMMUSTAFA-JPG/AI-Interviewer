@@ -141,8 +141,9 @@ SPEECH_INJECTION_SCRIPT = """
         }
 
         // Use 300ms restart delay when interrupted — candidate is actively speaking.
-        // Use 1500ms on natural end — prevents echo from immediately being captured.
-        const restartDelay = wasInterrupted ? 300 : 1500;
+        // Use 500ms on natural end — echo gate (echoGateMs) handles the STT queue drain;
+        // 1500ms was excessive and added a full dead zone to every bot turn.
+        const restartDelay = wasInterrupted ? 300 : 500;
         restartBackoff = restartDelay;
 
         emit("TTS_ENDED:");
@@ -157,8 +158,8 @@ SPEECH_INJECTION_SCRIPT = """
     window.__set_echo_gate = function(ms) {
         // TTS calls this with actual audio duration so echo gate matches real playback.
         // Prevents bot words from leaking as candidate speech after long responses.
-        // Cap at 1500ms — longer creates too much dead-zone for short responses.
-        echoGateMs = Math.min(Math.max(ms, ECHO_GATE_MS), 1500);
+        // Cap at 800ms — 1500ms was excessive and added a second of dead-zone.
+        echoGateMs = Math.min(Math.max(ms, ECHO_GATE_MS), 800);
         emit("ECHO_GATE_SET:", echoGateMs);
     };
 
@@ -184,7 +185,8 @@ SPEECH_INJECTION_SCRIPT = """
     // Phases that expect short answers (CLOSING) use a shorter silence window
     // to avoid making the candidate wait 4.5s for a response to "yes".
     window.__set_silence_ms = function(ms) {
-        VAD_SILENCE_MS_dynamic = Math.max(200, Math.min(8000, ms));
+        // Floor 400ms — below this, mid-sentence pauses trigger false end-of-speech.
+        VAD_SILENCE_MS_dynamic = Math.max(400, Math.min(2000, ms));
         emit("STT_SILENCE_MS_SET:", VAD_SILENCE_MS_dynamic);
     };
 

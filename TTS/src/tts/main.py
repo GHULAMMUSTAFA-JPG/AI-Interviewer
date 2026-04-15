@@ -145,8 +145,8 @@ class TTSService:
         # 2.2: Publish estimated audio duration so echo guard can set dynamic echo gate.
         # Edge TTS s16le 22050Hz mono → ~44100 bytes/sec. Estimate from text length.
         # Rough heuristic: ~5 chars/word, ~150 words/min → ~12.5ms per char.
-        # Capped at 1500ms per the spec — matches JS __set_echo_gate cap.
-        estimated_audio_ms = min(int(len(doc.text) * 12.5), 1500)
+        # Capped at 800ms — matches new JS __set_echo_gate cap.
+        estimated_audio_ms = min(int(len(doc.text) * 12.5), 800)
         try:
             from .redis_client import get_redis as _get_redis
             _redis = await _get_redis()
@@ -161,8 +161,8 @@ class TTSService:
         # 4.1: arm/guard handshake — wait for echo guard to confirm __tts_started()
         # has been called in the browser before we play audio. Replaces guessed 0.3s sleep.
         # Echo guard publishes tts:{id}:guard_ready after __tts_started() succeeds.
-        # Timeout 500ms: if guard_ready never arrives, proceed anyway (no regression).
-        guard_ready = await self._wait_for_guard_ready(doc.interview_id, timeout=0.5)
+        # Timeout 100ms: Redis round-trip is <10ms; 100ms is generous. Was 500ms.
+        guard_ready = await self._wait_for_guard_ready(doc.interview_id, timeout=0.1)
         if not guard_ready:
             logger.debug(
                 f"guard_ready timeout (proceeding): interview={doc.interview_id} — "

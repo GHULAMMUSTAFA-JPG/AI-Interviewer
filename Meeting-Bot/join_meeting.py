@@ -593,11 +593,11 @@ async def join_meeting_and_transcribe(
             # CLOSING uses shorter window (candidate says "yes/no" and waits for reply).
             # TECHNICAL uses longer window (candidate is explaining a system design).
             _PHASE_SILENCE_MS = {
-                "INTRO": 4000,
-                "EXPERIENCE": 4000,
-                "TECHNICAL": 5000,
-                "BEHAVIORAL": 4000,
-                "CLOSING": 2500,
+                "INTRO": 600,
+                "EXPERIENCE": 700,
+                "TECHNICAL": 800,
+                "BEHAVIORAL": 700,
+                "CLOSING": 500,
             }
             _last_known_phase: list[str] = ["INTRO"]  # mutable cell for closure
 
