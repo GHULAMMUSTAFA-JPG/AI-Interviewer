@@ -255,6 +255,12 @@ async def main() -> None:
         await _connect_with_retry()
         db = MongoDB.get_db()
 
+        # Compound index: every turn does find({interview_id, speaker}) — needs this
+        await db.transcripts.create_index(
+            [("interview_id", 1), ("speaker", 1), ("timestamp", -1)],
+            background=True
+        )
+
         logger.info("AI Interview Agent started!")
         logger.info(f"Listening for candidate messages in {Config.MONGODB_DB}...")
         logger.info(f"Using LLM provider: {Config.LLM_PROVIDER}")
