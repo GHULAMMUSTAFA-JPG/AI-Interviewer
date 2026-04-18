@@ -133,6 +133,17 @@ class TTSService:
         After playing (naturally or interrupted): disarm so bot_speaking=False
         and Meeting-Bot stops sending interrupt signals.
         """
+        # Skip interviews handled by a local TTS listener inside a bot container.
+        # The orchestrator sets tts:{id}:local before spawning the container.
+        try:
+            from .redis_client import get_redis as _get_redis
+            _redis = await _get_redis()
+            if await _redis.exists(f"tts:{doc.interview_id}:local"):
+                logger.debug(f"[TTS] Skipping local interview {doc.interview_id}")
+                return
+        except Exception:
+            pass  # Redis unavailable — fall through and handle normally
+
         logger.info(
             f"Processing transcript: interview={doc.interview_id} chars={len(doc.text)}"
         )

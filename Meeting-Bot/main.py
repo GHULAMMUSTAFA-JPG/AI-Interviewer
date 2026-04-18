@@ -80,7 +80,61 @@ async def run_bot(interview: dict) -> None:
     )
 
 
+async def _run_single_interview(interview_id: str) -> None:
+    """
+    Single-interview mode — used when INTERVIEW_ID env var is set.
+
+    Reads the interview document from MongoDB, runs the bot, then exits.
+    The orchestrator spawns one container per interview, so the container
+    lifecycle maps 1:1 to the interview lifecycle.
+    """
+    msg = f"[SINGLE] Starting single-interview mode for {interview_id}"
+    print(msg); await push_log(msg)
+
+    client = await _connect_with_retry()
+    db = client[DB_NAME]
+
+    # Wait for interview document (it may not be committed yet when container starts)
+    interview = None
+    for _ in range(20):
+        interview = await db["interviews"].find_one({"interview_id": interview_id})
+        if interview:
+            break
+        await asyncio.sleep(1)
+
+    if not interview:
+        msg = f"[SINGLE] Interview {interview_id} not found in MongoDB — exiting"
+        print(msg); await push_log(msg)
+        return
+
+    # Signal shared TTS service to skip this interview (local TTS handles it)
+    try:
+        redis = await get_redis()
+        await redis.setex(f"tts:{interview_id}:local", 7200, "1")  # 2h TTL
+        msg = f"[SINGLE] Marked tts:{interview_id}:local in Redis"
+        print(msg); await push_log(msg)
+    except Exception as e:
+        print(f"⚠️  Redis flag failed (continuing): {e}")
+
+    try:
+        await run_bot(interview)
+    finally:
+        # Clear the Redis flag so shared TTS can process any post-interview cleanup
+        try:
+            redis = await get_redis()
+            await redis.delete(f"tts:{interview_id}:local")
+        except Exception:
+            pass
+        await close_redis()
+
+
 async def main() -> None:
+    # Single-interview mode: INTERVIEW_ID set by orchestrator when spawning container
+    single_interview_id = os.getenv("INTERVIEW_ID", "").strip()
+    if single_interview_id:
+        await _run_single_interview(single_interview_id)
+        return
+
     shutdown_event = asyncio.Event()
 
     loop = asyncio.get_running_loop()

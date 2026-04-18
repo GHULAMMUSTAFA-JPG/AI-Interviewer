@@ -96,4 +96,17 @@ ctl.!default { type pulse }
 EOF
 
 log "✅ Ready - Starting Meeting Bot..."
-exec python3 main.py
+
+if [ -n "$INTERVIEW_ID" ]; then
+    # Single-interview mode: start local TTS listener in background, then run the bot
+    log "Single-interview mode: INTERVIEW_ID=$INTERVIEW_ID"
+    log "Starting local TTS listener..."
+    python3 /app/tts_listener.py &
+    TTS_PID=$!
+    log "TTS listener started (PID=$TTS_PID)"
+    exec python3 main.py
+else
+    # Orchestrator mode: no local TTS needed, just watch and spawn containers
+    log "Orchestrator mode: watching for new interviews..."
+    exec python3 orchestrator.py
+fi

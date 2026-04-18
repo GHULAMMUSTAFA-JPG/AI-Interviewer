@@ -184,8 +184,6 @@ services:
       dockerfile: ../docker/tts.Dockerfile
     container_name: tts
     depends_on:
-      meeting-bot:
-        condition: service_healthy
       redis:
         condition: service_healthy
     env_file:
@@ -193,8 +191,6 @@ services:
     environment:
       - VIRTUAL_MIC=virtual_mic
       - PULSE_SERVER=unix:/var/run/pulse/native
-    volumes:
-      - pulse-socket:/var/run/pulse
     networks:
       - interview-net
     restart: unless-stopped
@@ -214,40 +210,46 @@ services:
           cpus: '0.25'
 
   # ────────────────────────────────────────────────────────────────
-  # Meeting-Bot: headless Chrome + caption scraper.
+  # Meeting-Bot orchestrator: watches MongoDB for new interviews and
+  # spawns one dedicated container per interview via Docker API.
+  # Each spawned container gets its own Chrome + PulseAudio + TTS.
   # ────────────────────────────────────────────────────────────────
   meeting-bot:
     build:
       context: ./Meeting-Bot
       dockerfile: ../docker/meeting-bot.Dockerfile
+    image: interview-meeting-bot          # named so orchestrator can reference it
     container_name: meeting-bot
     depends_on:
       redis:
         condition: service_healthy
     env_file:
       - .env.docker
-    shm_size: "2gb"
+    environment:
+      - MEETING_BOT_IMAGE=interview-meeting-bot
+      - DOCKER_NETWORK=interview-net
     volumes:
       - meeting_bot_recordings:/app/recordings
-      - pulse-socket:/var/run/pulse
-      - chrome_profile:/app/chrome_profile
+      - /var/run/docker.sock:/var/run/docker.sock   # Docker-in-Docker for container spawning
     networks:
       - interview-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "bash", "-c", "pactl info &>/dev/null"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 60s
+      test: ["CMD", "python3", "-c", "import docker; docker.from_env().ping()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     deploy:
       resources:
         limits:
-          memory: 3G        # Chrome + PulseAudio + Playwright (shm_size adds 2G on top)
-          cpus: '2.0'
+          memory: 512M        # orchestrator only — no Chrome
+          cpus: '1.0'
         reservations:
-          memory: 512M
-          cpus: '0.5'
+          memory: 128M
+          cpus: '0.25'
 
   # ────────────────────────────────────────────────────────────────
   # UI: FastAPI web form.
@@ -290,8 +292,6 @@ volumes:
   mongodb_data:
   redis_data:        # Redis persistent data (AOF)
   meeting_bot_recordings:
-  pulse-socket:      # Shared between meeting-bot (PulseAudio server) and tts (client)
-  chrome_profile:    # Persistent Chrome profile (login, cookies) across container restarts
 
 # ══════════════════════════════════════════════════════════════════════
 # Networks

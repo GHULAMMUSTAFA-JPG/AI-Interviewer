@@ -17,6 +17,12 @@ aiohttp>=3.9.0
 # System & Environment
 pytz>=2024.1
 
+# Local TTS playback inside bot containers
+edge-tts>=6.1.9
+
+# Docker SDK for orchestrator (spawning per-interview bot containers)
+docker>=7.0.0
+
 # VNC Web Interface (noVNC)
 websockify>=0.10.0
-redis>=5.0.0 
+redis>=5.0.0

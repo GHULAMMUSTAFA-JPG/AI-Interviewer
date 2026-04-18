@@ -95,7 +95,7 @@ async def join_meeting_and_transcribe(
     async with async_playwright() as p:
         try:
             # Remove stale Chrome lock files
-            chrome_profile_dir = "/app/chrome_profile"
+            chrome_profile_dir = f"/app/chrome_profile_{interview_id}"
             for lock_name in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
                 lock_file = Path(chrome_profile_dir) / lock_name
                 if lock_file.exists() or lock_file.is_symlink():

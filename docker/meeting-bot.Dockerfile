@@ -88,6 +88,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # ALSA utilities (fallback audio)
     alsa-utils \
     \
+    # MP3 decoding for edge-tts local TTS playback
+    mpg123 \
+    \
     # Cleanup
     && rm -rf /var/lib/apt/lists/*
 
