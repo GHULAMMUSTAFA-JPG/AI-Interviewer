@@ -10,7 +10,7 @@ Environment variables (inherited from .env.docker):
                          default: interview-meeting-bot
   MONGODB_URI         — passed through to spawned containers
   BOT_EMAIL           — passed through to spawned containers
-  REDIS_URL           — passed through to spawned containers
+  REDIS_URI           — passed through to spawned containers
   EDGE_TTS_VOICE      — passed through to spawned containers
   STT_LANGUAGE        — passed through to spawned containers
 """
@@ -35,7 +35,7 @@ DB_NAME       = "interviews"
 _PASS_THROUGH_VARS = [
     "MONGODB_URI",
     "BOT_EMAIL",
-    "REDIS_URL",
+    "REDIS_URI",
     "REDIS_HOST",
     "REDIS_PORT",
     "EDGE_TTS_VOICE",

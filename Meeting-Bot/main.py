@@ -119,12 +119,17 @@ async def _run_single_interview(interview_id: str) -> None:
     try:
         await run_bot(interview)
     finally:
-        # Clear the Redis flag so shared TTS can process any post-interview cleanup
+        # Mark any unplayed agent transcripts so shared TTS (which has no PulseAudio)
+        # never synthesizes them. The tts:local Redis flag expires via its 2h TTL —
+        # we do NOT delete it here, because deleting it would expose these docs to
+        # shared TTS before they're all marked.
         try:
-            redis = await get_redis()
-            await redis.delete(f"tts:{interview_id}:local")
-        except Exception:
-            pass
+            await db["transcripts"].update_many(
+                {"interview_id": interview_id, "audio_url": None, "speaker": "agent"},
+                {"$set": {"audio_url": "bot_container_exited"}},
+            )
+        except Exception as e:
+            print(f"[SINGLE] Failed to mark remaining transcripts: {e}")
         await close_redis()
 
 

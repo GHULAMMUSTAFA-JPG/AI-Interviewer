@@ -13,7 +13,7 @@ tts_synthesis_duration_seconds = Histogram(
 tts_processed_total = Counter(
     "tts_processed_total",
     "Total transcripts processed by TTS",
-    ["status"],    # status: played | skipped_local | error | stale
+    ["status"],    # status: played | skipped_local | skipped_no_pa | error | stale
 )
 
 tts_mp3_bytes_total = Counter(

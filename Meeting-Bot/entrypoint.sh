@@ -79,7 +79,18 @@ EOF
 # ── Start local TTS listener then the bot ────────────────────────────────────
 log "Starting local TTS listener..."
 python3 /app/tts_listener.py &
-log "TTS listener started (PID=$!)"
+TTS_PID=$!
+log "TTS listener started (PID=$TTS_PID)"
 
 log "Starting bot for $INTERVIEW_ID..."
-exec python3 /app/main.py
+python3 /app/main.py
+BOT_EXIT=$?
+
+# Give tts_listener time to finish the current utterance before the container exits.
+# main.py has already marked transcripts as bot_container_exited, so tts_listener
+# will only finish playing what it already started — not pick up new work.
+log "Bot exited (rc=$BOT_EXIT) — waiting up to 30s for TTS listener to finish..."
+kill -TERM $TTS_PID 2>/dev/null || true
+wait $TTS_PID 2>/dev/null || true
+log "TTS listener stopped. Container exiting."
+exit $BOT_EXIT

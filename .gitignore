@@ -71,6 +71,9 @@ docs/
 # ── Session continuation files ────────────────────────────────────
 2026-*-this-session-*.txt
 
+# ── TLS certificates (never commit private keys) ─────────────────
+docker/nginx/certs/
+
 # ── Project-specific ──────────────────────────────────────────────
 .mds/
 history/

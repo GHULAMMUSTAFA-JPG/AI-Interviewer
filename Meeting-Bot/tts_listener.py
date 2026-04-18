@@ -50,20 +50,31 @@ async def _fetch_mp3(text: str) -> bytes:
 
 
 async def _play(mp3_data: bytes) -> None:
-    """Decode MP3 → PCM s16le 22050Hz mono via mpg123, pipe to pacat → virtual_mic."""
+    """Decode MP3 → PCM via mpg123, then stream PCM to pacat → virtual_mic.
+
+    Two-step (matches edge_synthesizer.py): mpg123 decodes all PCM into memory
+    first, then pacat plays it. Avoids the stdout/communicate deadlock that
+    occurs when piping mpg123's stdout directly to pacat's stdin in asyncio.
+    """
+    # Step 1: MP3 → raw PCM s16le 22050Hz mono
     mpg = await asyncio.create_subprocess_exec(
         "mpg123", "-q", "-r", "22050", "-m", "-s", "-",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
     )
+    pcm_data, _ = await mpg.communicate(input=mp3_data)
+    if mpg.returncode != 0 or not pcm_data:
+        raise RuntimeError(f"mpg123 decode failed (rc={mpg.returncode})")
+
+    # Step 2: PCM → pacat → virtual_mic (local PulseAudio)
     pacat = await asyncio.create_subprocess_exec(
         "pacat", "--playback", f"--device={VIRTUAL_MIC}",
         "--format=s16le", "--rate=22050", "--channels=1",
-        stdin=mpg.stdout,
+        stdin=asyncio.subprocess.PIPE,
     )
-    mpg.stdout.close()
-    pcm, _ = await mpg.communicate(input=mp3_data)
+    pacat.stdin.write(pcm_data)
+    pacat.stdin.close()
     await pacat.wait()
 
 

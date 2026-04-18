@@ -38,11 +38,39 @@ class TTSService:
         self._running = False
         # Tracks interviews that already have a pending resume to prevent cascade
         self._pending_resumes: set[str] = set()
+        # Set to False when PulseAudio is unavailable (e.g. pulse-socket not mounted).
+        # When False, skip synthesis entirely — just mark transcripts played.
+        self._pulse_available: bool = True
+
+    async def _probe_pulseaudio(self) -> bool:
+        """Return True if pacat can connect to PulseAudio right now."""
+        import asyncio as _asyncio
+        try:
+            proc = await _asyncio.create_subprocess_exec(
+                "pactl", "info",
+                stdout=_asyncio.subprocess.DEVNULL,
+                stderr=_asyncio.subprocess.DEVNULL,
+            )
+            await _asyncio.wait_for(proc.wait(), timeout=3.0)
+            return proc.returncode == 0
+        except Exception:
+            return False
 
     async def start(self) -> None:
         """Start TTS service."""
         logger.info("Starting TTS Service (MongoDB interrupt mode)...")
         logger.info(f"Edge TTS active (free, no API key) — voice={config.edge_tts_voice}")
+
+        self._pulse_available = await self._probe_pulseaudio()
+        if self._pulse_available:
+            logger.info("PulseAudio available — audio playback enabled")
+        else:
+            logger.warning(
+                "PulseAudio unavailable (pulse-socket not mounted?) — "
+                "shared TTS running in DB-only mode. "
+                "Transcripts will be marked played without synthesis. "
+                "Per-container tts_listener handles audio for all active interviews."
+            )
 
         self._running = True
 
@@ -145,6 +173,19 @@ class TTSService:
                 return
         except Exception:
             pass  # Redis unavailable — fall through and handle normally
+
+        # If PulseAudio is unavailable at startup, skip synthesis to avoid wasting
+        # Edge TTS API calls. Simply mark the transcript played and return.
+        if not self._pulse_available:
+            logger.debug(
+                f"[TTS] PA unavailable — marking transcript played without synthesis: {doc.id}"
+            )
+            tts_processed_total.labels(status="skipped_no_pa").inc()
+            try:
+                await self._transcript_updater.mark_played(doc.id, None)
+            except Exception as e:
+                logger.warning(f"[TTS] mark_played failed: {e}")
+            return
 
         logger.info(
             f"Processing transcript: interview={doc.interview_id} chars={len(doc.text)}"
