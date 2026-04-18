@@ -10,6 +10,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from .config import config
 from .logging_config import setup_logging
+from .metrics import start_metrics_server, tts_processed_total, tts_synthesis_duration_seconds
 from .tts_queue import TranscriptListener
 from .edge_synthesizer import EdgeTTSSynthesizer
 from .audio_player import AudioPlayer
@@ -140,6 +141,7 @@ class TTSService:
             _redis = await _get_redis()
             if await _redis.exists(f"tts:{doc.interview_id}:local"):
                 logger.debug(f"[TTS] Skipping local interview {doc.interview_id}")
+                tts_processed_total.labels(status="skipped_local").inc()
                 return
         except Exception:
             pass  # Redis unavailable — fall through and handle normally
@@ -424,6 +426,7 @@ class TTSService:
 async def main() -> None:
     """Async entry point."""
     setup_logging(os.getenv("LOG_LEVEL", "INFO"))
+    start_metrics_server()
     service = TTSService()
 
     loop = asyncio.get_event_loop()

@@ -34,6 +34,9 @@ services:
   redis:
     image: redis:7-alpine
     container_name: redis
+    # To enable auth: set REDIS_PASSWORD in .env.docker, then change command to:
+    #   redis-server /usr/local/etc/redis/redis.conf --requirepass ${REDIS_PASSWORD}
+    # and update REDIS_URI to: redis://:${REDIS_PASSWORD}@redis:6379/0
     command: redis-server /usr/local/etc/redis/redis.conf
     environment:
       - TZ=Asia/Karachi
@@ -67,9 +70,15 @@ services:
   mongodb:
     image: mongo:7.0
     container_name: mongodb
+    # To enable auth: uncomment the MONGO_INITDB vars and add --auth to command.
+    # Then update MONGODB_URI in .env.docker to:
+    #   mongodb://admin:${MONGO_ROOT_PASSWORD}@mongodb:27017/?replicaSet=rs0&authSource=admin
+    # WARNING: enabling auth on an existing database requires running mongo-init first.
     command: ["--replSet", "rs0", "--bind_ip_all"]
     environment:
       - TZ=Asia/Karachi
+      # - MONGO_INITDB_ROOT_USERNAME=admin
+      # - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD:-changeme}
     ports:
       - "27017:27017"       # EXPOSED - Connect Compass to mongodb://localhost:27017
     volumes:
@@ -120,6 +129,10 @@ services:
         condition: service_healthy
     env_file:
       - .env.docker
+    environment:
+      - METRICS_PORT=9001
+    ports:
+      - "9001:9001"     # Prometheus metrics (internal use — remove if not needed)
     networks:
       - interview-net
     restart: unless-stopped
@@ -191,6 +204,9 @@ services:
     environment:
       - VIRTUAL_MIC=virtual_mic
       - PULSE_SERVER=unix:/var/run/pulse/native
+      - METRICS_PORT=9002
+    ports:
+      - "9002:9002"     # Prometheus metrics
     networks:
       - interview-net
     restart: unless-stopped
@@ -285,6 +301,93 @@ services:
           cpus: '0.25'
 
 
+  # ────────────────────────────────────────────────────────────────
+  # nginx: Reverse proxy + rate limiting.
+  # Port 80 → UI:8080  |  Grafana is accessed directly on port 3000.
+  # HTTPS: uncomment ssl block in docker/nginx/nginx.conf when cert ready.
+  # ────────────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: nginx
+    depends_on:
+      - ui
+    ports:
+      - "80:80"         # HTTP — main app entry point
+      # - "443:443"     # Uncomment when TLS cert is added
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # - ./docker/nginx/certs:/etc/nginx/certs:ro   # Uncomment for HTTPS
+    networks:
+      - interview-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.5'
+
+  # ────────────────────────────────────────────────────────────────
+  # Prometheus — scrapes /metrics from interview-agent and tts.
+  # UI: http://localhost:9090
+  # ────────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - interview-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+
+  # ────────────────────────────────────────────────────────────────
+  # Grafana — dashboards for LLM latency, TTS duration, interviews.
+  # UI: http://localhost:3000  (default login: admin / admin)
+  # Set GF_SECURITY_ADMIN_PASSWORD in .env.docker for a real password.
+  # ────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: grafana
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_HTTP_PORT=3000
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - interview-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+
 # ══════════════════════════════════════════════════════════════════════
 # Volumes
 # ══════════════════════════════════════════════════════════════════════
@@ -292,6 +395,8 @@ volumes:
   mongodb_data:
   redis_data:        # Redis persistent data (AOF)
   meeting_bot_recordings:
+  prometheus_data:   # Prometheus TSDB — 30-day retention
+  grafana_data:      # Grafana dashboards, users, alert state
 
 # ══════════════════════════════════════════════════════════════════════
 # Networks

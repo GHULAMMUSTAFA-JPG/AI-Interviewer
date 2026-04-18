@@ -57,12 +57,12 @@ async def run_bot(interview: dict) -> None:
     meeting_url = meeting_url.rstrip("/")
 
     if not meeting_url:
-        msg = f"No meeting_url in interview {interview_id} — skipping"
-        print(msg); await push_log(msg)
+        msg = f"No meeting_url — skipping"
+        print(msg); await push_log(msg, interview_id=interview_id)
         return
 
-    msg = f"Starting bot for interview_id={interview_id}  url={meeting_url}"
-    print(msg); await push_log(msg)
+    msg = f"Starting bot  url={meeting_url}"
+    print(msg); await push_log(msg, interview_id=interview_id)
 
     # Update Redis status
     try:

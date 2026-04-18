@@ -42,6 +42,7 @@ structlog.configure(
 
 from src.config import Config, MongoDB, logger
 from src.agent.pipeline import process_candidate_message
+from src.metrics import start_metrics_server, active_interviews
 
 logger_struct = structlog.get_logger()
 
@@ -252,6 +253,7 @@ async def main() -> None:
 
     try:
         Config.validate()
+        start_metrics_server()
         await _connect_with_retry()
         db = MongoDB.get_db()
 

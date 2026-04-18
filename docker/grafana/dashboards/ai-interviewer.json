@@ -1,0 +1,80 @@
+{
+  "title": "AI Interviewer",
+  "uid": "ai-interviewer",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "LLM Calls / min",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "rate(llm_calls_total[1m]) * 60",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "LLM p95 Latency (s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(llm_call_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.50, rate(llm_call_duration_seconds_bucket[5m]))",
+          "legendFormat": "p50"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Interviews Completed (total)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "interviews_completed_total", "legendFormat": "completed" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Interviews Abandoned (total)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 8 },
+      "targets": [
+        { "expr": "interviews_abandoned_total", "legendFormat": "abandoned" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "TTS Synthesis Duration p95 (s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(tts_synthesis_duration_seconds_bucket[5m]))",
+          "legendFormat": "TTS p95"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "TTS Transcripts Processed",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        {
+          "expr": "rate(tts_processed_total[1m]) * 60",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    }
+  ]
+}

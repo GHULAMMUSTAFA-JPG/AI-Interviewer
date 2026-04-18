@@ -1,93 +1,74 @@
 #!/bin/bash
 set -e
 
-export DISPLAY=:99
-export PULSE_SERVER=unix:/var/run/pulse/native
 export PYTHONUNBUFFERED=1
 
 log() { echo "[$(date '+%H:%M:%S')] $1"; }
 
-# Clean stale locks
+# ── Orchestrator mode (no INTERVIEW_ID set) ──────────────────────────────────
+# No Chrome or PulseAudio needed — skip the entire audio/display setup.
+if [ -z "$INTERVIEW_ID" ]; then
+    log "Orchestrator mode — skipping display/audio setup"
+    exec python3 /app/orchestrator.py
+fi
+
+# ── Single-interview mode ─────────────────────────────────────────────────────
+# Each spawned container runs exactly one interview then exits.
+log "Single-interview mode: INTERVIEW_ID=$INTERVIEW_ID"
+
+export DISPLAY=:99
+export PULSE_SERVER=unix:/var/run/pulse/native
+
+# Clean stale locks from any previous run in this container
 rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
 pkill -9 Xvfb pulseaudio 2>/dev/null || true
 
-# Start Xvfb (virtual display for Chrome)
+# ── Xvfb (virtual display for Chrome) ────────────────────────────────────────
 log "Starting Xvfb :99..."
 Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset -nolisten tcp &
 sleep 1
-log "✅ Xvfb running"
+log "Xvfb running"
 
-# Start PulseAudio - MATCH OTHER PROJECT'S CONFIG
+# ── PulseAudio ────────────────────────────────────────────────────────────────
 log "Starting PulseAudio..."
 mkdir -p /var/run/pulse /root/.config/pulse
 chmod 777 /var/run/pulse
 
-# Configure PulseAudio (exact same as other project)
-mkdir -p /etc/pulse
 cat > /etc/pulse/default.pa << 'EOF'
-# Load native protocol for TTS container
 load-module module-native-protocol-unix auth-anonymous=1 socket=/var/run/pulse/native
-
-# Create virtual devices (exact same as other project)
 load-module module-null-sink sink_name=VirtualSink sink_properties="device.description=VirtualSink"
 load-module module-remap-source source_name=BotMic master=VirtualSink.monitor source_properties="device.description=BotMicCapture"
 load-module module-null-sink sink_name=virtual_mic sink_properties="device.description=VirtualMic"
 load-module module-remap-source source_name=virtual_mic_source master=virtual_mic.monitor source_properties="device.description=VirtualMicSource"
-
-# Set defaults (exact same as other project)
 set-default-sink VirtualSink
 set-default-source virtual_mic_source
-
-# Keep virtual_mic running (prevents Chrome WebRTC suspension)
 EOF
 
-# Start PulseAudio
-pulseaudio --daemonize=yes --exit-idle-time=-1 --disallow-exit --use-pid-file=false 2>&1 || log "⚠️  PulseAudio start returned non-zero"
+pulseaudio --daemonize=yes --exit-idle-time=-1 --disallow-exit --use-pid-file=false 2>&1 \
+    || log "PulseAudio start returned non-zero (may still be running)"
 sleep 2
 
-# Verify PulseAudio is running
 if pactl info &>/dev/null; then
-    log "✅ PulseAudio running"
-    # Show device list for debugging
-    log "PulseAudio sources:"
-    pactl list sources short 2>&1 | while read line; do log "  $line"; done
-    log "PulseAudio sinks:"
-    pactl list sinks short 2>&1 | while read line; do log "  $line"; done
+    log "PulseAudio running"
+    pactl set-sink-volume VirtualSink 150%   || true
+    pactl set-sink-volume virtual_mic 150%   || true
+    pactl set-source-volume virtual_mic_source 150% || true
 else
-    log "❌ PulseAudio NOT running - trying fallback..."
+    log "WARNING: PulseAudio not responding — retrying..."
     pulseaudio --daemonize=yes --exit-idle-time=-1 2>&1 || true
-    sleep 1
+    sleep 2
 fi
 
-# Boost VirtualSink output volume so TTS audio is clearly audible
-pactl set-sink-volume VirtualSink 150% && log "✅ VirtualSink volume set to 150%" || log "⚠️  Could not set VirtualSink volume"
+# Keep virtual_mic alive so Chrome WebRTC doesn't suspend it
+pacat --playback --device=virtual_mic --format=s16le --rate=22050 --channels=1 \
+    < /dev/zero &
 
-# Boost virtual_mic volume so bot's TTS voice reaches Google Meet clearly
-pactl set-sink-volume virtual_mic 150% && log "✅ virtual_mic volume set to 150%" || log "⚠️  Could not set virtual_mic volume"
-pactl set-source-volume virtual_mic_source 150% && log "✅ virtual_mic_source volume set to 150%" || log "⚠️  Could not set virtual_mic_source volume"
-
-# NOTE: TTS audio now plays directly to virtual_mic sink (not VirtualSink).
-# This sends bot's voice to Chrome's microphone input for Google Meet,
-# while keeping VirtualSink clean for STT echo monitoring.
-# No loopback module needed — avoids audio quality degradation.
-
-# AFTER PulseAudio starts, start keep-alive for virtual_mic (matches other project)
-log "Starting virtual_mic keep-alive (silence)..."
-pacat --playback --device=virtual_mic \
-      --format=s16le --rate=22050 --channels=1 \
-      < /dev/zero &
-
-# Chrome audio policy
-log "Writing Chrome audio policy..."
+# ── Chrome audio policy ───────────────────────────────────────────────────────
 mkdir -p /etc/opt/chrome/policies/managed
 cat > /etc/opt/chrome/policies/managed/allow_audio.json << 'EOF'
-{
-  "AudioCaptureAllowed": true,
-  "AudioCaptureAllowedUrls": ["meet.google.com", "https://meet.google.com"]
-}
+{"AudioCaptureAllowed": true, "AudioCaptureAllowedUrls": ["meet.google.com", "https://meet.google.com"]}
 EOF
 
-# ALSA config
 cat > /etc/asound.conf << 'EOF'
 pcm.pulse { type pulse }
 ctl.pulse { type pulse }
@@ -95,18 +76,10 @@ pcm.!default { type pulse }
 ctl.!default { type pulse }
 EOF
 
-log "✅ Ready - Starting Meeting Bot..."
+# ── Start local TTS listener then the bot ────────────────────────────────────
+log "Starting local TTS listener..."
+python3 /app/tts_listener.py &
+log "TTS listener started (PID=$!)"
 
-if [ -n "$INTERVIEW_ID" ]; then
-    # Single-interview mode: start local TTS listener in background, then run the bot
-    log "Single-interview mode: INTERVIEW_ID=$INTERVIEW_ID"
-    log "Starting local TTS listener..."
-    python3 /app/tts_listener.py &
-    TTS_PID=$!
-    log "TTS listener started (PID=$TTS_PID)"
-    exec python3 main.py
-else
-    # Orchestrator mode: no local TTS needed, just watch and spawn containers
-    log "Orchestrator mode: watching for new interviews..."
-    exec python3 orchestrator.py
-fi
+log "Starting bot for $INTERVIEW_ID..."
+exec python3 /app/main.py

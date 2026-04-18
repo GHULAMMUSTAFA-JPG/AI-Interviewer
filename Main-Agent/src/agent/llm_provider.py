@@ -37,6 +37,7 @@ from src.config import (
 )
 from src.exceptions import LLMException
 from src.agent.retry import llm_circuit_breaker, summary_circuit_breaker
+from src.metrics import llm_calls_total, llm_call_duration_seconds
 
 logger_struct = structlog.get_logger()
 
@@ -149,6 +150,8 @@ class GeminiProvider(LLMProvider):
                 response_length=len(response.text),
                 model=self.model
             )
+            llm_calls_total.labels(provider="gemini", status="success").inc()
+            llm_call_duration_seconds.labels(provider="gemini").observe(latency_ms / 1000)
             return response.text
 
         except Exception as e:
@@ -162,6 +165,7 @@ class GeminiProvider(LLMProvider):
                     session_calls=call_num,
                     hint="quota exhausted — switch API key or wait for daily reset"
                 )
+                llm_calls_total.labels(provider="gemini", status="rate_limited").inc()
             else:
                 logger_struct.error(
                     "llm_call_failed",
@@ -171,6 +175,7 @@ class GeminiProvider(LLMProvider):
                     latency_ms=round(latency_ms, 2),
                     exc_info=True
                 )
+                llm_calls_total.labels(provider="gemini", status="error").inc()
             raise LLMException(f"Gemini error: {e}")
 
     @retry(
