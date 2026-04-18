@@ -98,6 +98,18 @@ class LLMProvider(ABC):
         response = await self.generate(prompt)
         return {"response": response, "summary": None}
 
+    async def generate_json(self, prompt: str) -> dict:
+        """Generate a structured JSON response.
+        Default: call generate() and parse the text as JSON.
+        GeminiProvider overrides this to use native JSON output mode.
+        """
+        text = await self.generate(prompt)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            cleaned = re.sub(r'^```(?:json)?\s*|\s*```$', '', text.strip(), flags=re.MULTILINE)
+            return json.loads(cleaned)
+
 
 class GeminiProvider(LLMProvider):
     """Optimized Gemini Flash 2.5 implementation with tenacity retry"""
@@ -237,6 +249,17 @@ class GeminiProvider(LLMProvider):
     )
     async def generate_combined(self, prompt: str) -> dict:
         """ONE call returning {"response": str, "summary": str} using JSON output mode."""
+        return await summary_circuit_breaker.call(self._call_gemini_json, prompt)
+
+    @retry(
+        stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
+        wait=_gemini_wait,
+        retry=retry_if_exception_type(Exception),
+        before_sleep=before_sleep_log(logger_struct, logging.WARNING),
+        reraise=True
+    )
+    async def generate_json(self, prompt: str) -> dict:
+        """Generate a structured JSON response using native Gemini JSON output mode."""
         return await summary_circuit_breaker.call(self._call_gemini_json, prompt)
 
 
