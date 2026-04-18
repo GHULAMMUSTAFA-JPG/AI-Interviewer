@@ -1,18 +1,8 @@
 # ════════════════════════════════════════════════════════════════════════════════
 # Meeting-Bot — Headless Chrome + PulseAudio + Persistent Profile
-#
-# Build args:
-#   BUILD_ENV=dev  (default) — includes VNC + noVNC for remote desktop debugging
-#   BUILD_ENV=prod           — no VNC, smaller image (~120 MB saved)
-#
-# Usage:
-#   docker compose up --build                           # dev (VNC on :5900/:6080)
-#   docker build --build-arg BUILD_ENV=prod ...         # prod, no VNC
 # ════════════════════════════════════════════════════════════════════════════════
 
 FROM ubuntu:22.04
-
-ARG BUILD_ENV=dev
 
 # ════════════════════════════════════════════════════════════════════════════════
 # Base Configuration
@@ -21,28 +11,23 @@ ARG BUILD_ENV=dev
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 
-# Set timezone
+# Set timezone — use azure.archive.ubuntu.com (reliable CDN, no 400 errors)
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && \
     echo $TZ > /etc/timezone && \
-    apt-get update && \
-    apt-get upgrade -y && \
-    apt-get install -y software-properties-common && \
-    add-apt-repository ppa:deadsnakes/ppa
+    echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80retries && \
+    sed -i 's|http://archive.ubuntu.com/ubuntu|http://azure.archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list && \
+    sed -i 's|http://security.ubuntu.com/ubuntu|http://azure.archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
 
 # ════════════════════════════════════════════════════════════════════════════════
-# Core Dependencies
+# Core Dependencies + deadsnakes PPA (no software-properties-common needed)
 # ════════════════════════════════════════════════════════════════════════════════
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    # Python
-    python3.11 \
-    python3.11-venv \
-    python3.11-dev \
-    python3-pip \
-    \
     # Build tools
     wget \
     curl \
+    gpg \
+    gpg-agent \
     \
     # Certificate management
     apt-transport-https \
@@ -51,8 +36,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     lsb-release \
     \
     # Cleanup
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+    && rm -rf /var/lib/apt/lists/*
+
+# Add deadsnakes PPA manually — avoids software-properties-common and its 100+ dependencies
+RUN gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys F23C5A6CF475977595C89F51BA6932366A755776 && \
+    gpg --export F23C5A6CF475977595C89F51BA6932366A755776 | tee /etc/apt/trusted.gpg.d/deadsnakes.gpg > /dev/null && \
+    echo "deb https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu jammy main" > /etc/apt/sources.list.d/deadsnakes.list
+
+# Install Python 3.11
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
 
 # ════════════════════════════════════════════════════════════════════════════════
 # Google Chrome Installation
@@ -69,25 +66,15 @@ RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add
 RUN google-chrome --version
 
 # ════════════════════════════════════════════════════════════════════════════════
-# Xvfb — Virtual display (always required for headless Chrome)
-# VNC + noVNC — debug tooling, included only when BUILD_ENV=dev
+# Xvfb — Virtual display (required for headless Chrome)
 # ════════════════════════════════════════════════════════════════════════════════
 
-# Always: Xvfb + fonts for headless Chrome
 RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb \
     x11-utils \
     fonts-liberation \
     fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
-
-# Dev-only: VNC server + noVNC web viewer for remote desktop debugging
-RUN if [ "$BUILD_ENV" = "dev" ]; then \
-        apt-get update && apt-get install -y --no-install-recommends \
-            x11vnc \
-            novnc \
-        && rm -rf /var/lib/apt/lists/*; \
-    fi
 
 # ════════════════════════════════════════════════════════════════════════════════
 # PulseAudio — Virtual Audio Sink for TTS

@@ -215,8 +215,6 @@ services:
 
   # ────────────────────────────────────────────────────────────────
   # Meeting-Bot: headless Chrome + caption scraper.
-  # VNC enabled for debugging - connect to localhost:5900
-  # noVNC web interface available at http://localhost:6080/vnc.html
   # ────────────────────────────────────────────────────────────────
   meeting-bot:
     build:
@@ -235,9 +233,6 @@ services:
       - chrome_profile:/app/chrome_profile
     networks:
       - interview-net
-    ports:
-      - "5900:5900"  # VNC port for desktop clients
-      - "6080:6080"  # noVNC web interface
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "bash", "-c", "pactl info &>/dev/null"]
