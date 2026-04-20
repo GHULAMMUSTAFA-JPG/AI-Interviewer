@@ -25,6 +25,8 @@ VALID_SHORT_ANSWERS = {
 }
 
 _last_speech_time: dict[str, float] = {}  # interview_id → timestamp
+_buffer_start_time: dict[str, float] = {}  # interview_id → when first word was appended
+MAX_UTTERANCE_SECONDS = 30  # flush after 30s of continuous speech regardless of VAD
 
 
 def init_speech_state():
@@ -35,7 +37,7 @@ def init_speech_state():
 async def _get_buffer(redis, interview_id: str) -> str:
     """Get speech buffer for this interview."""
     val = await redis.get(f"speech:{interview_id}:buffer")
-    return val.decode() if val else ""
+    return val if isinstance(val, str) else (val.decode() if val else "")
 
 
 async def _set_buffer(redis, interview_id: str, text: str):
@@ -46,7 +48,7 @@ async def _set_buffer(redis, interview_id: str, text: str):
 async def _get_last_saved(redis, interview_id: str) -> str:
     """Get last saved text for dedup."""
     val = await redis.get(f"speech:{interview_id}:last_saved")
-    return val.decode() if val else ""
+    return val if isinstance(val, str) else (val.decode() if val else "")
 
 
 async def _set_last_saved(redis, interview_id: str, text: str):
@@ -107,7 +109,15 @@ async def _flush_speech_buffer(redis, interview_id: str) -> None:
 async def append_speech(redis, interview_id: str, text: str):
     """Append text to this interview's speech buffer."""
     key = f"speech:{interview_id}:buffer"
+    now = asyncio.get_event_loop().time()
+    if interview_id not in _buffer_start_time:
+        _buffer_start_time[interview_id] = now
     await redis.append(key, text + " ")
+    # Force flush if candidate has been speaking for too long without a pause
+    if now - _buffer_start_time[interview_id] >= MAX_UTTERANCE_SECONDS:
+        _buffer_start_time.pop(interview_id, None)
+        cancel_pending_flush(interview_id)
+        asyncio.create_task(_flush_speech_buffer(redis, interview_id))
 
 
 async def clear_speech_buffer(redis, interview_id: str):
@@ -122,6 +132,7 @@ async def reset_session(redis, interview_id: str):
     await _set_last_saved(redis, interview_id, "")
     _speech_timers.pop(interview_id, None)
     _last_speech_time.pop(interview_id, None)
+    _buffer_start_time.pop(interview_id, None)
 
 
 def get_last_speech_time(interview_id: str = None) -> float:

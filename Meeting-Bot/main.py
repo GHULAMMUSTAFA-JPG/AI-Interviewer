@@ -107,15 +107,6 @@ async def _run_single_interview(interview_id: str) -> None:
         print(msg); await push_log(msg)
         return
 
-    # Signal shared TTS service to skip this interview (local TTS handles it)
-    try:
-        redis = await get_redis()
-        await redis.setex(f"tts:{interview_id}:local", 7200, "1")  # 2h TTL
-        msg = f"[SINGLE] Marked tts:{interview_id}:local in Redis"
-        print(msg); await push_log(msg)
-    except Exception as e:
-        print(f"⚠️  Redis flag failed (continuing): {e}")
-
     try:
         await run_bot(interview)
     finally:

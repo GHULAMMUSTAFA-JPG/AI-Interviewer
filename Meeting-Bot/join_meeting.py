@@ -625,7 +625,7 @@ async def join_meeting_and_transcribe(
                                     if _redis:
                                         from stt_speech_buffer import _flush_speech_buffer, append_speech
                                         buf = await _redis.get(f"speech:{interview_id}:buffer")
-                                        if buf and buf.decode().strip():
+                                        if buf and (buf if isinstance(buf, str) else buf.decode()).strip():
                                             msg = "Agent incoming — flushing partial candidate buffer"
                                             await push_log(msg)
                                             await _flush_speech_buffer(_redis, interview_id)

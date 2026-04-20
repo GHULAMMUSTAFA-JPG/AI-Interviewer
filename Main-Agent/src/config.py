@@ -140,6 +140,10 @@ class Config:
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
     QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen/qwen-2.5-coder-32b-instruct:free")
 
+    # DeepSeek
+    DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+    DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+
     # TTS Service
     TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL", "http://localhost:8080/synthesize")
 

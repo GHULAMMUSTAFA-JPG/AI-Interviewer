@@ -80,18 +80,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # PulseAudio — Virtual Audio Sink for TTS
 # ════════════════════════════════════════════════════════════════════════════════
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    # PulseAudio sound server
+RUN apt-get update --fix-missing || true && apt-get install -y --no-install-recommends --fix-missing \
     pulseaudio \
     pulseaudio-utils \
-    \
-    # ALSA utilities (fallback audio)
     alsa-utils \
-    \
-    # MP3 decoding for edge-tts local TTS playback
     mpg123 \
-    \
-    # Cleanup
     && rm -rf /var/lib/apt/lists/*
 
 # Configure PulseAudio for system mode (required for root in Docker)

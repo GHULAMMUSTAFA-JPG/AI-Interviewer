@@ -454,29 +454,134 @@ class QwenProvider(LLMProvider):
         return await summary_circuit_breaker.call(self._call_qwen, prompt)
 
 
+class DeepSeekProvider(LLMProvider):
+    """DeepSeek via their OpenAI-compatible API."""
+
+    def __init__(self):
+        from openai import AsyncOpenAI
+        self.client = AsyncOpenAI(
+            api_key=Config.DEEPSEEK_API_KEY,
+            base_url="https://api.deepseek.com",
+        )
+        self.model = Config.DEEPSEEK_MODEL
+        logger_struct.info("deepseek_provider_initialized", model=self.model)
+
+    async def _call(self, prompt: str) -> str:
+        start = time.perf_counter()
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=400,
+                temperature=0.7,
+            )
+            text = response.choices[0].message.content
+            if not text:
+                raise LLMException("DeepSeek returned empty response")
+            logger_struct.info("deepseek_response_generated",
+                latency_ms=round((time.perf_counter() - start) * 1000, 2))
+            return text
+        except LLMException:
+            raise
+        except Exception as e:
+            raise LLMException(f"DeepSeek error: {e}")
+
+    @retry(stop=stop_after_attempt(RETRY_MAX_ATTEMPTS), wait=_gemini_wait,
+           retry=retry_if_exception_type(Exception),
+           before_sleep=before_sleep_log(logger_struct, logging.WARNING), reraise=True)
+    async def generate(self, prompt: str) -> str:
+        return await llm_circuit_breaker.call(self._call, prompt)
+
+    async def generate_combined(self, prompt: str) -> dict:
+        text = await self._call(prompt)
+        json_match = re.search(r'\{[\s\S]*\}', text)
+        if json_match:
+            try:
+                parsed = json.loads(json_match.group())
+                if "response" in parsed:
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+        return {"response": text, "summary": {}}
+
+    async def generate_summary(self, prompt: str) -> str:
+        return await summary_circuit_breaker.call(self._call, prompt)
+
+
+class FallbackProvider(LLMProvider):
+    """Tries providers in order, falling back on any exception."""
+
+    def __init__(self, providers: list[LLMProvider]):
+        self._providers = providers
+
+    async def _with_fallback(self, method: str, *args) -> str:
+        last_exc = None
+        for provider in self._providers:
+            try:
+                return await getattr(provider, method)(*args)
+            except Exception as exc:
+                logger_struct.warning("fallback_provider_failed",
+                    provider=type(provider).__name__, method=method, error=str(exc))
+                last_exc = exc
+        raise last_exc
+
+    async def generate(self, prompt: str) -> str:
+        return await self._with_fallback("generate", prompt)
+
+    async def generate_combined(self, prompt: str) -> dict:
+        return await self._with_fallback("generate_combined", prompt)
+
+    async def generate_summary(self, prompt: str) -> str:
+        return await self._with_fallback("generate_summary", prompt)
+
+    async def generate_json(self, prompt: str) -> dict:
+        return await self._with_fallback("generate_json", prompt)
+
+
 # Module-level singleton — created once at first call, reused for every message.
-# This avoids creating a new genai.Client (HTTP session + TLS handshake) on every turn.
 _provider_instance: LLMProvider | None = None
 
 
+def _build_provider(name: str) -> LLMProvider:
+    name = name.lower()
+    if name == "gemini":
+        return GeminiProvider()
+    elif name == "openai":
+        return OpenAIProvider()
+    elif name == "anthropic":
+        return AnthropicProvider()
+    elif name == "qwen":
+        return QwenProvider()
+    elif name == "deepseek":
+        return DeepSeekProvider()
+    else:
+        raise ValueError(f"Unknown LLM provider: {name}")
+
+
 def get_llm_provider() -> LLMProvider:
-    """Return the singleton LLM provider, initializing it on first call."""
+    """Return the singleton LLM provider, initializing it on first call.
+
+    Always wraps in FallbackProvider: primary → DeepSeek → Qwen.
+    Fallbacks are skipped if their API key is not set.
+    """
     global _provider_instance
 
     if _provider_instance is None:
-        provider = Config.LLM_PROVIDER.lower()
+        primary = _build_provider(Config.LLM_PROVIDER)
 
-        if provider == "gemini":
-            _provider_instance = GeminiProvider()
-        elif provider == "openai":
-            _provider_instance = OpenAIProvider()
-        elif provider == "anthropic":
-            _provider_instance = AnthropicProvider()
-        elif provider == "qwen":
-            _provider_instance = QwenProvider()
+        fallbacks = []
+        if Config.DEEPSEEK_API_KEY and Config.LLM_PROVIDER.lower() != "deepseek":
+            fallbacks.append(DeepSeekProvider())
+        if Config.OPENROUTER_API_KEY and Config.LLM_PROVIDER.lower() != "qwen":
+            fallbacks.append(QwenProvider())
+
+        if fallbacks:
+            _provider_instance = FallbackProvider([primary] + fallbacks)
+            logger_struct.info("llm_provider_singleton_created",
+                provider=Config.LLM_PROVIDER,
+                fallbacks=[type(f).__name__ for f in fallbacks])
         else:
-            raise ValueError(f"Unknown LLM provider: {provider}")
-
-        logger_struct.info("llm_provider_singleton_created", provider=provider)
+            _provider_instance = primary
+            logger_struct.info("llm_provider_singleton_created", provider=Config.LLM_PROVIDER)
 
     return _provider_instance

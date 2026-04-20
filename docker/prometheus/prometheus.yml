@@ -19,7 +19,5 @@ scrape_configs:
       - targets: ["interview-agent:9001"]
     metrics_path: /metrics
 
-  - job_name: "tts"
-    static_configs:
-      - targets: ["tts:9002"]
-    metrics_path: /metrics
+  # tts service removed — audio is handled per-interview by tts_listener.py inside
+  # each bot container. Add a scrape target here if a metrics endpoint is added there.

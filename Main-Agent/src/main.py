@@ -51,11 +51,11 @@ logger_struct = structlog.get_logger()
 # -------------------------------------------------------
 _pending_tasks: set[asyncio.Task] = set()
 
-# Per-interview locks — ensures only one LLM call runs at a time per interview.
-# Without this, two candidate messages arriving within seconds each spawn their
-# own asyncio task → two concurrent LLM calls → two TTS responses queued → bot
-# talks non-stop and doesn't let the candidate speak.
-_interview_locks: dict[str, asyncio.Lock] = {}
+# Per-interview active task — only one LLM pipeline runs per interview at a time.
+# When a new candidate message arrives, the in-flight task is cancelled immediately
+# so the new one starts fresh with up-to-date context. This replaces the old lock
+# approach which serialised (waited) instead of cancelling (discarded).
+_active_tasks: dict[str, asyncio.Task] = {}
 
 
 
@@ -128,11 +128,25 @@ async def _watch(db, pipeline: list, resume_token: dict | None,
             logger.info(f"   Message: {transcript['text'][:50]}...")
 
             interview_id = str(transcript.get("interview_id", "unknown"))
+
+            # Cancel any in-flight LLM task for this interview before starting a new one.
+            # This handles: speech fragmentation, speaking during LLM processing, and
+            # any case where the candidate sends a new message before the bot has responded.
+            existing = _active_tasks.get(interview_id)
+            if existing and not existing.done():
+                existing.cancel()
+                logger.info(f"[CANCEL] Cancelled in-flight task for {interview_id} — newer message arrived")
+
             task = asyncio.create_task(
-                _process_with_interview_lock(db, transcript_id, interview_id)
+                _process_with_error_handling(db, transcript_id)
             )
+            _active_tasks[interview_id] = task
             _pending_tasks.add(task)
             task.add_done_callback(_pending_tasks.discard)
+            task.add_done_callback(
+                lambda t, iid=interview_id: _active_tasks.pop(iid, None)
+                if _active_tasks.get(iid) is t else None
+            )
 
 
 # -------------------------------------------------------
@@ -330,22 +344,13 @@ async def main() -> None:
 # Per-message error handler + interview lock wrapper
 # -------------------------------------------------------
 
-async def _process_with_interview_lock(db, transcript_id: str, interview_id: str) -> None:
-    """
-    Acquire the per-interview lock before processing.  This serialises LLM calls
-    for the same interview so two near-simultaneous candidate messages can never
-    produce two concurrent responses.
-    """
-    if interview_id not in _interview_locks:
-        _interview_locks[interview_id] = asyncio.Lock()
-    async with _interview_locks[interview_id]:
-        await _process_with_error_handling(db, transcript_id)
-
-
 async def _process_with_error_handling(db, transcript_id: str) -> None:
     try:
         output = await process_candidate_message(db, transcript_id)
-        logger.info(f"[SUCCESS] {output.response_text[:100]}...")
+        if output.response_text:
+            logger.info(f"[SUCCESS] {output.response_text[:100]}...")
+    except asyncio.CancelledError:
+        logger.info(f"[CANCELLED] Pipeline for {transcript_id} cancelled — newer message took over")
     except Exception as exc:
         logger.error(f"[ERROR] Failed to process {transcript_id}: {exc}")
 

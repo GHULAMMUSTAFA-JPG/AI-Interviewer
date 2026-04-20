@@ -71,8 +71,9 @@ docs/
 # ── Session continuation files ────────────────────────────────────
 2026-*-this-session-*.txt
 
-# ── TLS certificates (never commit private keys) ─────────────────
+# ── TLS certificates and MongoDB keyfile (never commit) ──────────
 docker/nginx/certs/
+docker/mongo/keyfile
 
 # ── Project-specific ──────────────────────────────────────────────
 .mds/

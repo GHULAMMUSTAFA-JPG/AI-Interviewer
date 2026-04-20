@@ -23,12 +23,37 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 MONGO_URI = os.getenv("MONGODB_URI", "mongodb://host.docker.internal:27017/?replicaSet=rs0")
+REDIS_URI = os.getenv("REDIS_URI", "redis://localhost:6379/0")
 INTERVIEW_ID = os.environ["INTERVIEW_ID"]
-VOICE = os.getenv("EDGE_TTS_VOICE", "en-US-GuyNeural")
+VOICE = os.getenv("EDGE_TTS_VOICE", "en-US-AndrewNeural")
 VIRTUAL_MIC = os.getenv("VIRTUAL_MIC", "virtual_mic")
 DB_NAME = "interviews"
 
 _MAX_RETRIES = 3
+_interrupt_event: asyncio.Event = asyncio.Event()  # set when interrupt signal arrives
+
+_redis_client = None  # shared Redis client for status publishing
+
+
+async def _get_redis():
+    global _redis_client
+    if _redis_client is None:
+        from redis.asyncio import Redis
+        _redis_client = Redis.from_url(REDIS_URI, decode_responses=True)
+    return _redis_client
+
+
+async def _publish_tts_status(status: str, interrupted: bool = False, duration_ms: int = 0) -> None:
+    """Publish TTS status to Redis so the echo guard can gate/ungate the browser STT."""
+    import json
+    try:
+        r = await _get_redis()
+        payload = json.dumps({"status": status, "interrupted": interrupted})
+        await r.publish(f"tts:{INTERVIEW_ID}:status_events", payload)
+        if duration_ms > 0:
+            await r.set(f"tts:{INTERVIEW_ID}:audio_duration_ms", str(duration_ms), ex=60)
+    except Exception as e:
+        log.warning(f"Redis status publish failed (non-fatal): {e}")
 
 
 async def _fetch_mp3(text: str) -> bytes:
@@ -37,7 +62,7 @@ async def _fetch_mp3(text: str) -> bytes:
     last_exc: Exception = RuntimeError("no attempts")
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
-            communicate = edge_tts.Communicate(text=text, voice=VOICE, rate="+0%", volume="+0%")
+            communicate = edge_tts.Communicate(text=text, voice=VOICE, rate="+15%", volume="+0%")
             chunks = [c["data"] async for c in communicate.stream() if c["type"] == "audio"]
             if not chunks:
                 raise RuntimeError("edge-tts returned no audio data")
@@ -49,13 +74,12 @@ async def _fetch_mp3(text: str) -> bytes:
     raise last_exc
 
 
-async def _play(mp3_data: bytes) -> None:
+async def _play(mp3_data: bytes) -> tuple[bool, int]:
     """Decode MP3 → PCM via mpg123, then stream PCM to pacat → virtual_mic.
-
-    Two-step (matches edge_synthesizer.py): mpg123 decodes all PCM into memory
-    first, then pacat plays it. Avoids the stdout/communicate deadlock that
-    occurs when piping mpg123's stdout directly to pacat's stdin in asyncio.
+    Returns (played_fully, duration_ms).
     """
+    _interrupt_event.clear()
+
     # Step 1: MP3 → raw PCM s16le 22050Hz mono
     mpg = await asyncio.create_subprocess_exec(
         "mpg123", "-q", "-r", "22050", "-m", "-s", "-",
@@ -67,6 +91,9 @@ async def _play(mp3_data: bytes) -> None:
     if mpg.returncode != 0 or not pcm_data:
         raise RuntimeError(f"mpg123 decode failed (rc={mpg.returncode})")
 
+    # Duration: s16le 22050Hz mono = 2 bytes/sample
+    duration_ms = int(len(pcm_data) / (22050 * 2) * 1000)
+
     # Step 2: PCM → pacat → virtual_mic (local PulseAudio)
     pacat = await asyncio.create_subprocess_exec(
         "pacat", "--playback", f"--device={VIRTUAL_MIC}",
@@ -75,7 +102,36 @@ async def _play(mp3_data: bytes) -> None:
     )
     pacat.stdin.write(pcm_data)
     pacat.stdin.close()
-    await pacat.wait()
+
+    # Wait for playback to finish OR interrupt signal — whichever comes first
+    done, _ = await asyncio.wait(
+        [asyncio.create_task(pacat.wait()),
+         asyncio.create_task(_interrupt_event.wait())],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    if _interrupt_event.is_set():
+        try:
+            pacat.terminate()
+        except Exception:
+            pass
+        log.info("Playback interrupted by candidate speech")
+        return False, duration_ms
+    return True, duration_ms
+
+
+async def _watch_interrupt() -> None:
+    """Subscribe to Redis interrupt_signal channel and set _interrupt_event."""
+    try:
+        from redis.asyncio import Redis
+        r = Redis.from_url(REDIS_URI, decode_responses=True)
+        pubsub = r.pubsub()
+        await pubsub.subscribe(f"tts:{INTERVIEW_ID}:interrupt_signal")
+        async for message in pubsub.listen():
+            if message.get("type") == "message":
+                log.info("Interrupt signal received — stopping TTS")
+                _interrupt_event.set()
+    except Exception as e:
+        log.warning(f"Interrupt watcher error: {e}")
 
 
 async def _mark_played(db, doc_id) -> None:
@@ -91,6 +147,9 @@ async def _mark_played(db, doc_id) -> None:
 
 async def main() -> None:
     log.info(f"Starting local TTS listener for interview {INTERVIEW_ID}")
+
+    # Run interrupt watcher concurrently so we can stop pacat mid-playback
+    asyncio.create_task(_watch_interrupt())
 
     client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=10000)
     db = client[DB_NAME]
@@ -138,10 +197,16 @@ async def _handle(db, doc: dict) -> None:
     log.info(f"Speaking: {text[:70]}...")
     try:
         mp3 = await _fetch_mp3(text)
-        await _play(mp3)
-        log.info(f"Done speaking ({len(mp3):,} bytes MP3)")
+        # Notify echo guard: bot is about to speak — gate the browser STT
+        await _publish_tts_status("speaking")
+        played_fully, duration_ms = await _play(mp3)
+        log.info(f"Done speaking ({len(mp3):,} bytes MP3, {duration_ms}ms)")
+        # Notify echo guard: bot finished — ungate STT, pass duration for echo gate
+        await _publish_tts_status("idle", interrupted=not played_fully, duration_ms=duration_ms)
     except Exception as e:
         log.error(f"TTS error: {e}")
+        # Ensure STT is always ungated even on error
+        await _publish_tts_status("idle")
     finally:
         await _mark_played(db, doc["_id"])
 

@@ -9,6 +9,7 @@ Performance improvements:
 - First load: 50-100ms (MongoDB queries)
 - Subsequent loads: 0-5ms (cache hit)
 """
+import asyncio
 import time
 from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -58,19 +59,21 @@ async def load_interview_context(
             cached_context = interview_cache[cache_key]
             logger.debug("context_cache_hit", interview_id=interview_id)
 
-            interview = await db.interviews.find_one(
-                {"interview_id": interview_id},
-                projection={"phase": 1, "turn_count": 1, "status": 1, "conversation_summary": 1}
+            # Parallel fetch: interview state + recent messages (saves ~30-50ms vs sequential)
+            interview, raw_messages = await asyncio.gather(
+                db.interviews.find_one(
+                    {"interview_id": interview_id},
+                    projection={"phase": 1, "turn_count": 1, "status": 1,
+                                "conversation_summary": 1, "phase_turn_count": 1}
+                ),
+                db.transcripts.find(
+                    {"interview_id": interview_id}
+                ).sort("timestamp", -1).limit(MAX_CONVERSATION_HISTORY).to_list(MAX_CONVERSATION_HISTORY),
             )
             if not interview:
                 raise DocumentNotFoundError(f"Interview not found: {interview_id}")
 
-            recent_messages_cursor = db.transcripts.find(
-                {"interview_id": interview_id}
-            ).sort("timestamp", -1).limit(MAX_CONVERSATION_HISTORY)
-            recent_messages = await recent_messages_cursor.to_list(length=MAX_CONVERSATION_HISTORY)
-            recent_messages.reverse()
-
+            raw_messages.reverse()
             recent_messages = [
                 {
                     "speaker": msg["speaker"],
@@ -79,7 +82,7 @@ async def load_interview_context(
                     if isinstance(msg.get("timestamp"), datetime)
                     else msg.get("timestamp"),
                 }
-                for msg in recent_messages
+                for msg in raw_messages
             ]
 
             context = InterviewContext(
@@ -88,6 +91,7 @@ async def load_interview_context(
                 turn_count=interview.get("turn_count", 0),
                 status=interview.get("status", "in_progress"),
                 conversation_summary=interview.get("conversation_summary", ""),
+                phase_turn_count=interview.get("phase_turn_count", 0),
                 recent_messages=recent_messages,
                 latest_message=latest_message,
             )
@@ -154,6 +158,7 @@ async def load_interview_context(
             turn_count=interview.get("turn_count", 0),
             status=interview.get("status", "in_progress"),
             conversation_summary=interview.get("conversation_summary", ""),
+            phase_turn_count=interview.get("phase_turn_count", 0),
             recent_messages=recent_messages,
             latest_message=latest_message,
         )

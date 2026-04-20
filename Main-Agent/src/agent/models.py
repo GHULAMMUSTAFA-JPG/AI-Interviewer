@@ -85,6 +85,9 @@ class InterviewContext(BaseModel):
     recent_messages: list[dict]
     latest_message: str
 
+    # Phase tracking (avoids extra find_one in Stage 5)
+    phase_turn_count: int = 0
+
     # Safeguard tracking
     estimated_context_tokens: int = 0
 

@@ -2,7 +2,7 @@
   "title": "AI Interviewer",
   "uid": "ai-interviewer",
   "schemaVersion": 38,
-  "version": 1,
+  "version": 2,
   "refresh": "30s",
   "time": { "from": "now-1h", "to": "now" },
   "panels": [
@@ -20,7 +20,7 @@
     },
     {
       "id": 2,
-      "title": "LLM p95 Latency (s)",
+      "title": "LLM p95 / p50 Latency (s)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
       "targets": [
@@ -36,7 +36,7 @@
     },
     {
       "id": 3,
-      "title": "Interviews Completed (total)",
+      "title": "Interviews Completed",
       "type": "stat",
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 8 },
       "targets": [
@@ -45,7 +45,7 @@
     },
     {
       "id": 4,
-      "title": "Interviews Abandoned (total)",
+      "title": "Interviews Abandoned",
       "type": "stat",
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 8 },
       "targets": [
@@ -54,26 +54,20 @@
     },
     {
       "id": 5,
-      "title": "TTS Synthesis Duration p95 (s)",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "title": "Circuit Breaker Opens (total)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 8 },
       "targets": [
-        {
-          "expr": "histogram_quantile(0.95, rate(tts_synthesis_duration_seconds_bucket[5m]))",
-          "legendFormat": "TTS p95"
-        }
+        { "expr": "circuit_breaker_opens_total", "legendFormat": "opens" }
       ]
     },
     {
       "id": 6,
-      "title": "TTS Transcripts Processed",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "title": "Active Interviews",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 8 },
       "targets": [
-        {
-          "expr": "rate(tts_processed_total[1m]) * 60",
-          "legendFormat": "{{status}}"
-        }
+        { "expr": "active_interviews", "legendFormat": "active" }
       ]
     }
   ]

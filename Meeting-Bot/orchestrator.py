@@ -22,7 +22,6 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 
 from logger import push_log
-from redis_client import get_redis, close_redis
 
 load_dotenv()
 
@@ -69,8 +68,9 @@ async def _connect_with_retry(max_attempts: int = 10) -> AsyncIOMotorClient:
             await asyncio.sleep(wait)
 
 
-def _spawn_container(docker_client, interview_id: str) -> None:
-    """Synchronous Docker SDK call — runs in a thread via asyncio.to_thread."""
+def _spawn_container(docker_client, interview_id: str) -> str:
+    """Synchronous Docker SDK call — runs in a thread via asyncio.to_thread.
+    Returns the container id."""
     container_name = f"meeting-bot-{interview_id}"
 
     # Remove any stale container with the same name
@@ -88,23 +88,37 @@ def _spawn_container(docker_client, interview_id: str) -> None:
         network=NETWORK_NAME,
         shm_size="2g",
         detach=True,
-        remove=True,                # auto-remove on exit
         extra_hosts={"host.docker.internal": "host-gateway"},
     )
     print(f"[ORCH] Spawned container {container_name} (id={container.short_id})")
+    return container.id
+
+
+def _wait_and_cleanup(docker_client, container_id: str, container_name: str) -> None:
+    """Wait for a bot container to exit, print its tail logs, then remove it."""
+    try:
+        container = docker_client.containers.get(container_id)
+        result = container.wait(timeout=7200)  # max 2 hours
+        exit_code = result.get("StatusCode", -1)
+        tail = container.logs(tail=40).decode("utf-8", errors="replace")
+        print(f"[ORCH] Container {container_name} exited (rc={exit_code}). Last logs:\n{tail}")
+        container.remove(force=True)
+        print(f"[ORCH] Removed container {container_name}")
+    except docker.errors.NotFound:
+        pass
+    except Exception as exc:
+        print(f"[ORCH] Cleanup error for {container_name}: {exc}")
 
 
 async def _spawn(docker_client, interview_id: str, redis_client=None) -> None:
-    """Set Redis flag then spawn the container in a thread (non-blocking)."""
-    # Set tts:{id}:local BEFORE spawning so shared TTS skips transcripts immediately
-    if redis_client:
-        try:
-            await redis_client.setex(f"tts:{interview_id}:local", 7200, "1")
-        except Exception as e:
-            print(f"[ORCH] Redis flag warning: {e}")
-
+    """Spawn the container in a thread (non-blocking)."""
     try:
-        await asyncio.to_thread(_spawn_container, docker_client, interview_id)
+        container_id = await asyncio.to_thread(_spawn_container, docker_client, interview_id)
+        container_name = f"meeting-bot-{interview_id}"
+        # Background thread: wait for container to finish, print logs, then remove it
+        asyncio.get_event_loop().run_in_executor(
+            None, _wait_and_cleanup, docker_client, container_id, container_name
+        )
     except Exception as exc:
         print(f"[ORCH] Failed to spawn container for {interview_id}: {exc}")
         await push_log(f"[ORCH ERROR] spawn failed for {interview_id}: {exc}")
@@ -129,14 +143,6 @@ async def main() -> None:
     except Exception as exc:
         print(f"[ORCH] Docker SDK failed: {exc} — is /var/run/docker.sock mounted?")
         return
-
-    # Connect Redis (for setting tts:local flag)
-    redis_client = None
-    try:
-        redis_client = await get_redis()
-        print("[ORCH] Redis connected")
-    except Exception as e:
-        print(f"[ORCH] Redis not available (continuing without flag): {e}")
 
     mongo_client = await _connect_with_retry()
     db = mongo_client[DB_NAME]
@@ -171,7 +177,7 @@ async def main() -> None:
                     await push_log(f"[ORCH] Spawning bot container for {interview_id}")
 
                     task = asyncio.create_task(_spawn_and_track(
-                        docker_client, redis_client, interview_id, _active
+                        docker_client, interview_id, _active
                     ))
 
         except asyncio.CancelledError:
@@ -183,13 +189,12 @@ async def main() -> None:
             await asyncio.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, 30.0)
 
-    await close_redis()
     print("[ORCH] Orchestrator stopped")
 
 
-async def _spawn_and_track(docker_client, redis_client, interview_id: str, active: set) -> None:
+async def _spawn_and_track(docker_client, interview_id: str, active: set) -> None:
     try:
-        await _spawn(docker_client, interview_id, redis_client)
+        await _spawn(docker_client, interview_id)
     finally:
         # Don't remove from active — we want duplicate prevention to persist
         # for the lifetime of the orchestrator process.

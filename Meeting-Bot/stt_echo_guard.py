@@ -122,7 +122,7 @@ async def _watch_tts_status_redis(interview_id: str, status_state: dict, page):
             try:
                 current_status = await redis.hget(f"tts:{interview_id}:status", "status")
                 if current_status:
-                    current_is_speaking = current_status.decode() == "speaking"
+                    current_is_speaking = (current_status if isinstance(current_status, str) else current_status.decode()) == "speaking"
                     if current_is_speaking != status_state.get("bot_speaking", False):
                         status_state["bot_speaking"] = current_is_speaking
                         if current_is_speaking:
@@ -150,7 +150,7 @@ async def _watch_tts_status_redis(interview_id: str, status_state: dict, page):
                         try:
                             dur_bytes = await redis.get(f"tts:{interview_id}:audio_duration_ms")
                             if dur_bytes:
-                                dur_ms = int(dur_bytes.decode())
+                                dur_ms = int(dur_bytes if isinstance(dur_bytes, str) else dur_bytes.decode())
                                 await _safe_evaluate(
                                     page,
                                     f"window.__set_echo_gate && window.__set_echo_gate({dur_ms})",
@@ -190,7 +190,7 @@ async def _watch_tts_status_redis(interview_id: str, status_state: dict, page):
                         from stt_speech_buffer import clear_speech_buffer
                         try:
                             buf_bytes = await redis.get(f"speech:{interview_id}:buffer")
-                            buf_content = buf_bytes.decode() if buf_bytes else ""
+                            buf_content = (buf_bytes if isinstance(buf_bytes, str) else buf_bytes.decode()) if buf_bytes else ""
                         except Exception:
                             buf_content = ""
                         if buf_content.strip():

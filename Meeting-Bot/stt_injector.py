@@ -196,7 +196,7 @@ SPEECH_INJECTION_SCRIPT = """
         r.continuous      = true;
         r.interimResults  = true;
         r.lang            = '__STT_LANGUAGE__';
-        r.maxAlternatives = 1;
+        r.maxAlternatives = 3;
 
         r.onstart = function() {
             isRunning      = true;
