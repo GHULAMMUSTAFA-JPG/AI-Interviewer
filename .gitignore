@@ -62,11 +62,15 @@ TTS/models/piper/*.onnx.json
 *.txt
 !**/requirements.txt
 
-# ── Markdown (ignore ALL) ────────────────────────────────────────
+# ── Markdown (ignore ALL except README) ─────────────────────────
 *.md
+!README.md
 
 # ── Docs folder ──────────────────────────────────────────────────
 docs/
+
+# ── Claude Code ──────────────────────────────────────────────────
+.claude/
 
 # ── Session continuation files ────────────────────────────────────
 2026-*-this-session-*.txt
